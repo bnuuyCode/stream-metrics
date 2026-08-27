@@ -1,0 +1,38 @@
+# TEMPLATE — this file is versioned and goes to GitHub. NEVER put real values
+# here. Copy it to config.properties (git-ignored) and fill that copy in.
+#
+# Every setting here has a working default, so the application starts fine with
+# no config.properties at all — it simply reports Twitch as "not configured".
+
+# Port the local server listens on.
+server.port=7000
+
+# Where the SQLite file lives, relative to the working directory.
+# This file is the project's irreplaceable asset — see DECISIONS.md § 8.
+database.path=data/stream-metrics.db
+
+# Which timezone decides where one day ends and the next begins.
+# Deliberately not the machine's default: a laptop that guesses wrong would
+# shift the boundary and put two readings on the same calendar day.
+timezone=America/Sao_Paulo
+
+# --- Twitch -----------------------------------------------------------------
+#
+# Register an application at https://dev.twitch.tv/console/apps
+#   OAuth Redirect URL : http://localhost:7000/auth/twitch/callback
+#   Client Type        : Confidential
+#
+# clientId is NOT the application name you chose. It is the 30-character
+# identifier Twitch generates, shown on the application's own page next to
+# "Client ID".
+#
+# The redirect URL must match what is registered there character for character.
+# It is derived from server.port automatically, so it only needs to be set below
+# if you registered something different.
+#
+# Registering an application requires two-factor authentication on the Twitch
+# account.
+
+twitch.clientId=
+twitch.clientSecret=
+# twitch.redirectUri=http://localhost:7000/auth/twitch/callback

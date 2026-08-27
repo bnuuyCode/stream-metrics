@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>stream-metrics</title>
+    <style>
+        :root {
+            /* --- brand palette ----------------------------------------- */
+            --noir:    #141414;   /* main background of everything          */
+            --carvao:  #1B1B1B;   /* surfaces and boxes above the background */
+            --grafite: #2E2E2E;   /* dividers, firmer borders                */
+            --fumaca:  #5E5E5E;   /* secondary text, dimmed labels           */
+            --prata:   #B4B4B4;   /* body text                               */
+            --osso:    #EFEFEF;   /* titles, icons, whatever must stand out  */
+            --vinho:   #8E3A48;   /* the single accent                       */
+
+            /* --- roles --------------------------------------------------
+               Named by job rather than by colour, so the palette can be
+               swapped in one place without hunting through the stylesheet. */
+            --bg:      var(--noir);
+            --surface: var(--carvao);
+            --sunken:  var(--noir);     /* tiles inset inside a card */
+            --border:  var(--grafite);
+            --text:    var(--prata);
+            --heading: var(--osso);
+            --muted:   var(--fumaca);
+            --accent:  var(--vinho);
+
+            /* --- status ---------------------------------------------------
+               These are the one place the brand does not get a vote. Green,
+               amber and red are information, not decoration: the whole point
+               of this dashboard is telling at a glance whether a number can
+               be trusted. They are muted to sit inside a noir palette, but
+               never to the point of blending into it.
+
+               Error is deliberately far brighter and more saturated than
+               vinho. Both are reds, and an alarm that looks like the brand
+               accent is an alarm nobody notices. */
+            --ok:    #6FCF97;
+            --stale: #E3B341;
+            --error: #F2695F;
+
+            /* Going live is the loudest moment the dashboard has, so it gets
+               the accent — lifted just enough to hold its own against noir. */
+            --onair: #C4536A;
+        }
+
+        /* This design commits to dark. The palette is built on noir, and a
+           light variant would be a different brand wearing the same layout. */
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            padding: 3rem 1.5rem;
+            background: var(--bg);
+            color: var(--text);
+            font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+            line-height: 1.5;
+        }
+
+        main { max-width: 40rem; margin: 0 auto; }
+
+        h1 {
+            color: var(--heading);
+            font-size: 1.5rem;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+            margin: 0 0 0.25rem;
+        }
+
+        .subtitle { color: var(--muted); font-size: 0.9rem; margin: 0 0 2rem; }
+
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.25rem 1.5rem;
+            margin-bottom: 1rem;
+        }
+
+        /* On air gets a visible frame. The one moment the dashboard should
+           grab the eye from across the room. */
+        .card.on-air { border-color: var(--onair); }
+
+        .card-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .card-title {
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--muted);
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .on-air .card-title { color: var(--onair); }
+
+        .live-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--onair);
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.25; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .live-dot { animation: none; }
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 0.2rem 0.6rem;
+            border-radius: 999px;
+            border: 1px solid currentColor;
+            white-space: nowrap;
+        }
+
+        .badge::before {
+            content: "";
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: currentColor;
+        }
+
+        .badge.ok    { color: var(--ok); }
+        .badge.stale { color: var(--stale); }
+        .badge.error { color: var(--error); }
+
+        .stream-title {
+            color: var(--heading);
+            font-size: 1rem;
+            font-weight: 600;
+            margin: 0 0 0.15rem;
+            letter-spacing: -0.01em;
+        }
+
+        .stream-meta { font-size: 0.85rem; color: var(--muted); margin: 0 0 1rem; }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+            gap: 0.75rem;
+        }
+
+        .stat {
+            background: var(--sunken);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 0.9rem 1rem;
+        }
+
+        .stat-label {
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--muted);
+        }
+
+        .stat-value {
+            color: var(--heading);
+            font-size: 2rem;
+            font-weight: 650;
+            letter-spacing: -0.03em;
+            font-variant-numeric: tabular-nums;
+            line-height: 1.2;
+            margin: 0.15rem 0 0.5rem;
+        }
+
+        .stat.is-stale .stat-value { opacity: 0.45; }
+        .stat.is-error .stat-value { opacity: 0.3; }
+
+        .stat-foot { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+
+        .stat-note { font-size: 0.75rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+        /* --- recent streams table --- */
+
+        /* Wide content scrolls inside its own box rather than pushing the page
+           sideways on a narrow window. */
+        .sessions-wrap { overflow-x: auto; }
+
+        .sessions {
+            display: grid;
+            grid-template-columns: auto minmax(8rem, 1fr) auto auto auto;
+            gap: 0 1.25rem;
+            min-width: 26rem;
+        }
+
+        .sessions > span {
+            padding: 0.55rem 0;
+            border-top: 1px solid var(--border);
+            font-size: 0.875rem;
+            white-space: nowrap;
+        }
+
+        .sessions > .head {
+            border-top: none;
+            padding-top: 0;
+            font-size: 0.7rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--muted);
+        }
+
+        .sessions .num { text-align: right; font-variant-numeric: tabular-nums; }
+        .sessions .when { color: var(--muted); }
+
+        /* The only column allowed to be long, so it is the only one that
+           truncates. Numbers must never be cut off. */
+        .sessions .what {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            color: var(--heading);
+        }
+
+        dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 0.5rem 1.5rem; }
+        dt { color: var(--muted); font-size: 0.875rem; }
+        dd { margin: 0; font-size: 0.875rem; font-variant-numeric: tabular-nums; word-break: break-all; }
+
+        .dimmed { opacity: 0.5; }
+
+        .hint { color: var(--muted); font-size: 0.875rem; margin: 0; }
+        .hint code {
+            background: var(--sunken);
+            border: 1px solid var(--border);
+            border-radius: 5px;
+            padding: 0.1rem 0.35rem;
+            font-size: 0.85em;
+        }
+
+        .channel { font-size: 0.875rem; color: var(--muted); margin: 0 0 1rem; }
+        .channel strong { color: var(--heading); font-weight: 600; }
+
+        footer { margin-top: 1.5rem; display: flex; align-items: center; gap: 1rem; }
+
+        button, .button {
+            font: inherit;
+            font-size: 0.875rem;
+            padding: 0.4rem 0.9rem;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: var(--surface);
+            color: var(--text);
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+        }
+
+        button:hover, .button:hover { border-color: var(--accent); color: var(--heading); }
+
+        .button.primary {
+            border-color: var(--accent);
+            background: var(--accent);
+            color: var(--osso);
+            font-weight: 600;
+        }
+
+        .button.primary:hover { filter: brightness(1.15); }
+
+        .timestamp { color: var(--muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+    </style>
+</head>
+<body>
+<main>
+    <h1>stream-metrics</h1>
+    <p class="subtitle">Every platform on one screen.</p>
+
+    <section class="card" id="stream-card">
+        <div class="card-head">
+            <span class="card-title" id="stream-title">Stream</span>
+            <span id="stream-badge" class="badge stale">checking</span>
+        </div>
+        <div id="stream-body">
+            <p class="hint">…</p>
+        </div>
+    </section>
+
+    <section class="card">
+        <div class="card-head">
+            <span class="card-title">Twitch</span>
+            <span id="twitch-badge" class="badge stale">checking</span>
+        </div>
+        <div id="twitch-body">
+            <p class="hint">…</p>
+        </div>
+    </section>
+
+    <section class="card">
+        <div class="card-head">
+            <span class="card-title">Recent streams</span>
+            <span id="sessions-badge" class="badge stale">checking</span>
+        </div>
+        <div id="sessions-body">
+            <p class="hint">…</p>
+        </div>
+    </section>
+
+    <section class="card" id="health-card">
+        <div class="card-head">
+            <span class="card-title">Backend</span>
+            <span id="health-badge" class="badge stale">checking</span>
+        </div>
+        <dl>
+            <dt>Database</dt>
+            <dd id="db-path">—</dd>
+            <dt>Tables</dt>
+            <dd id="db-tables">—</dd>
+        </dl>
+    </section>
+
+    <footer>
+        <button id="refresh" type="button">Refresh</button>
+        <span id="timestamp" class="timestamp">never fetched</span>
+    </footer>
+</main>
+
+<script>
+    const timestamp = document.getElementById('timestamp');
+    const clock = iso => new Date(iso).toLocaleTimeString();
+
+    // Start of the current broadcast, so the uptime can tick every second
+    // without asking the server again. Null when off air.
+    let liveSince = null;
+
+    function paintBadge(element, status) {
+        const value = (status || 'ERROR').toLowerCase();
+        element.className = 'badge ' + value;
+        element.textContent = value;
+        return value;
+    }
+
+    function elapsed(sinceIso) {
+        const seconds = Math.max(0, Math.floor((Date.now() - new Date(sinceIso)) / 1000));
+        const h = Math.floor(seconds / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        const s = seconds % 60;
+        return h > 0
+            ? h + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0')
+            : m + ':' + String(s).padStart(2, '0');
+    }
+
+    /**
+     * Builds one stat tile from a freshness envelope.
+     *
+     * Everything this project stands for lives in these few lines: the number
+     * and its status are painted together, from the same object, in one pass.
+     * There is no code path that can render one without the other.
+     */
+    function statTile(label, envelope, format) {
+        const status = (envelope.status || 'ERROR').toLowerCase();
+
+        const tile = document.createElement('div');
+        tile.className = 'stat is-' + status;
+
+        const name = document.createElement('div');
+        name.className = 'stat-label';
+        name.textContent = label;
+
+        const value = document.createElement('div');
+        value.className = 'stat-value';
+        value.textContent = envelope.value === null || envelope.value === undefined
+            ? '—'
+            : (format ? format(envelope.value) : Number(envelope.value).toLocaleString());
+
+        const foot = document.createElement('div');
+        foot.className = 'stat-foot';
+
+        const badge = document.createElement('span');
+        paintBadge(badge, envelope.status);
+
+        const note = document.createElement('span');
+        note.className = 'stat-note';
+        note.textContent = status === 'error'
+            ? (envelope.message || 'unavailable')
+            : 'as of ' + clock(envelope.fetchedAt);
+
+        foot.append(badge, note);
+        tile.append(name, value, foot);
+        return tile;
+    }
+
+    function renderStream(response) {
+        const card = document.getElementById('stream-card');
+        const label = document.getElementById('stream-title');
+        const body = document.getElementById('stream-body');
+        paintBadge(document.getElementById('stream-badge'), response.status);
+
+        const info = response.value;
+        liveSince = null;
+        card.classList.remove('on-air');
+        label.textContent = 'Stream';
+
+        if (!info) {
+            const p = document.createElement('p');
+            p.className = 'hint';
+            p.textContent = response.message || 'unavailable';
+            body.replaceChildren(p);
+            return;
+        }
+
+        if (info.live) {
+            const now = info.current;
+            liveSince = now.startedAt;
+
+            card.classList.add('on-air');
+            label.replaceChildren(dot(), text('Live'));
+
+            const title = document.createElement('p');
+            title.className = 'stream-title';
+            title.textContent = now.title || 'Untitled';
+
+            const meta = document.createElement('p');
+            meta.className = 'stream-meta';
+            meta.textContent = now.category
+                ? now.category + ' · started ' + clock(now.startedAt)
+                : 'started ' + clock(now.startedAt);
+
+            // The three tiles share the parent envelope's freshness: they came
+            // from one reading, so they carry one timestamp.
+            const wrap = e => ({ value: e, status: response.status, fetchedAt: response.fetchedAt });
+
+            const stats = document.createElement('div');
+            stats.className = 'stats';
+            stats.append(
+                statTile('Viewers', wrap(now.viewers)),
+                statTile('Peak', wrap(now.peakViewers)),
+                statTile('Uptime', wrap(now.startedAt), elapsed)
+            );
+
+            // Marks the tile the uptime ticker updates in place.
+            stats.lastElementChild.querySelector('.stat-value').id = 'uptime-value';
+
+            body.replaceChildren(title, meta, stats);
+
+            if (now.sampleCount === 0) {
+                const note = document.createElement('p');
+                note.className = 'hint';
+                note.style.marginTop = '0.75rem';
+                // Honest about its own limits: peak needs samples to exist, and
+                // the sampler polls every five minutes while off air.
+                note.textContent = 'No viewer samples yet — the collector checks every five minutes while off air, so the first one may take a moment.';
+                body.append(note);
+            }
+            return;
+        }
+
+        const off = document.createElement('p');
+        off.className = 'hint';
+        off.textContent = 'Off air.';
+
+        body.replaceChildren(off);
+
+        if (info.previous) {
+            const prev = info.previous;
+            const dl = document.createElement('dl');
+            dl.style.marginTop = '1rem';
+
+            const rows = [
+                ['Last stream', prev.title || '—'],
+                ['Ended', prev.endedAt ? new Date(prev.endedAt).toLocaleString() : '—'],
+                ['Duration', prev.startedAt && prev.endedAt
+                    ? durationBetween(prev.startedAt, prev.endedAt)
+                    : '—'],
+                ['Peak viewers', prev.peakViewers ?? '—'],
+                ['Average viewers', prev.avgViewers != null ? prev.avgViewers.toFixed(1) : '—']
+            ];
+
+            rows.forEach(([k, v]) => {
+                const dt = document.createElement('dt');
+                dt.textContent = k;
+                const dd = document.createElement('dd');
+                dd.textContent = v;
+                dl.append(dt, dd);
+            });
+
+            body.append(dl);
+        }
+    }
+
+    function durationBetween(startIso, endIso) {
+        const seconds = Math.max(0, Math.floor((new Date(endIso) - new Date(startIso)) / 1000));
+        const h = Math.floor(seconds / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        return h > 0 ? h + 'h ' + m + 'min' : m + 'min';
+    }
+
+    function dot() {
+        const span = document.createElement('span');
+        span.className = 'live-dot';
+        return span;
+    }
+
+    function text(value) {
+        return document.createTextNode(value);
+    }
+
+    function renderTwitch(status, metrics) {
+        paintBadge(document.getElementById('twitch-badge'), status.status);
+        const body = document.getElementById('twitch-body');
+        const info = status.value;
+
+        if (!info) {
+            const p = document.createElement('p');
+            p.className = 'hint';
+            p.textContent = status.message || 'unavailable';
+            body.replaceChildren(p);
+            return;
+        }
+
+        if (info.state === 'NOT_CONFIGURED') {
+            body.innerHTML =
+                '<p class="hint">No credentials yet. Copy <code>config.properties.example</code> ' +
+                'to <code>config.properties</code>, fill in the Twitch client id and secret, ' +
+                'then restart.</p>';
+            return;
+        }
+
+        if (info.state === 'NOT_CONNECTED') {
+            body.innerHTML =
+                '<p class="hint" style="margin-bottom:1rem">Credentials found. Nobody has logged in yet.</p>' +
+                '<a class="button primary" href="/auth/twitch">Connect Twitch</a>';
+            return;
+        }
+
+        const channel = document.createElement('p');
+        channel.className = 'channel';
+        channel.innerHTML = '<strong></strong> <span></span>';
+        channel.querySelector('strong').textContent = info.displayName;
+        channel.querySelector('span').textContent = '@' + info.handle;
+
+        const stats = document.createElement('div');
+        stats.className = 'stats';
+        stats.append(
+            statTile('Followers', metrics.followers),
+            statTile('Subscribers', metrics.subscribers)
+        );
+
+        body.replaceChildren(channel, stats);
+    }
+
+    function renderSessions(response) {
+        paintBadge(document.getElementById('sessions-badge'), response.status);
+        const body = document.getElementById('sessions-body');
+        const sessions = response.value;
+
+        if (!sessions || sessions.length === 0) {
+            const p = document.createElement('p');
+            p.className = 'hint';
+            // Distinguishes "nothing recorded yet" from "could not read", which
+            // look identical if both just show an empty table.
+            p.textContent = response.status === 'ERROR'
+                ? (response.message || 'unavailable')
+                : 'No finished streams yet. A session appears here about ten minutes after it ends — the collector waits that long to be sure you are not coming back.';
+            body.replaceChildren(p);
+            return;
+        }
+
+        const grid = document.createElement('div');
+        grid.className = 'sessions';
+
+        ['Date', 'Stream', 'Duration', 'Peak', 'Avg'].forEach((label, i) => {
+            const cell = document.createElement('span');
+            cell.className = 'head' + (i >= 2 ? ' num' : '');
+            cell.textContent = label;
+            grid.append(cell);
+        });
+
+        sessions.forEach(s => {
+            const started = new Date(s.startedAt);
+
+            grid.append(
+                cell('when', started.toLocaleDateString(undefined, { day: '2-digit', month: 'short' })),
+                cell('what', s.title || 'Untitled'),
+                cell('num', s.startedAt && s.endedAt ? durationBetween(s.startedAt, s.endedAt) : '—'),
+                cell('num', s.peakViewers ?? '—'),
+                cell('num', s.avgViewers != null ? s.avgViewers.toFixed(1) : '—')
+            );
+        });
+
+        body.replaceChildren(wrap(grid));
+    }
+
+    function cell(className, value) {
+        const span = document.createElement('span');
+        span.className = className;
+        span.textContent = value;
+        if (className === 'what') span.title = value;
+        return span;
+    }
+
+    function wrap(child) {
+        const div = document.createElement('div');
+        div.className = 'sessions-wrap';
+        div.append(child);
+        return div;
+    }
+
+    function renderHealth(response) {
+        const status = paintBadge(document.getElementById('health-badge'), response.status);
+        const card = document.getElementById('health-card');
+
+        if (response.value) {
+            document.getElementById('db-path').textContent = response.value.path;
+            document.getElementById('db-tables').textContent = response.value.tableCount;
+        } else {
+            document.getElementById('db-path').textContent = response.message || 'unavailable';
+            document.getElementById('db-tables').textContent = '—';
+        }
+
+        card.classList.toggle('dimmed', status !== 'ok');
+        timestamp.textContent = 'as of ' + clock(response.fetchedAt);
+    }
+
+    function failed(message) {
+        // A failed fetch is a failure, shown as one. Never a silent retry that
+        // leaves the previous numbers standing.
+        return {
+            status: 'ERROR',
+            value: null,
+            message: message,
+            fetchedAt: new Date().toISOString()
+        };
+    }
+
+    async function get(url) {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return await res.json();
+    }
+
+    async function load() {
+        const [health, twitchStatus, twitchMetrics, live, sessions] = await Promise.all([
+            get('/api/health').catch(e => failed(e.message)),
+            get('/api/twitch/status').catch(e => failed(e.message)),
+            get('/api/twitch/metrics').catch(e => {
+                const envelope = failed(e.message);
+                return { followers: envelope, subscribers: envelope };
+            }),
+            get('/api/twitch/live').catch(e => failed(e.message)),
+            get('/api/twitch/sessions?limit=5').catch(e => failed(e.message))
+        ]);
+
+        renderStream(live);
+        renderTwitch(twitchStatus, twitchMetrics);
+        renderSessions(sessions);
+        renderHealth(health);
+    }
+
+    document.getElementById('refresh').addEventListener('click', load);
+
+    // The uptime is the one number recomputed locally every second. It is
+    // arithmetic on a timestamp the server already sent, not a value invented
+    // here — so it stays honest between refreshes.
+    setInterval(() => {
+        const element = document.getElementById('uptime-value');
+        if (element && liveSince) {
+            element.textContent = elapsed(liveSince);
+        }
+    }, 1000);
+
+    // Every 30 seconds while live, matching the server's live-status window.
+    setInterval(load, 30000);
+
+    load();
+</script>
+</body>
+</html>

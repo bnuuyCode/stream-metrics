@@ -1,0 +1,26 @@
+# --- Secrets and data. None of this may ever reach a public repository. ---
+config.properties
+*.db
+*.db-wal
+*.db-shm
+backups/
+export/
+
+# --- Build ---
+target/
+*.class
+
+# --- JetBrains ---
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# --- OS ---
+Thumbs.db
+.DS_Store
+
+# --- Crash dumps (msys/cygwin and the JVM leave these behind) ---
+*.stackdump
+*.core
+hs_err_pid*.log

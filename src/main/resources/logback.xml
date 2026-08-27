@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Logging configuration.
+
+    Without this file logback prints every message from every library at DEBUG
+    level, and the useful lines drown in Jetty startup noise.
+-->
+<configuration>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss} %-5level %-30logger{0} %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+
+    <!-- Jetty and Flyway are chatty at INFO. We only want to hear from them
+         when something is actually wrong. -->
+    <logger name="org.eclipse.jetty" level="WARN"/>
+    <logger name="org.flywaydb" level="WARN"/>
+
+</configuration>
