@@ -6,6 +6,11 @@ platform, and a history the platforms do not keep for you.
 Runs entirely on your own machine. No account, no subscription, no data leaving
 the building.
 
+> **Status: 0.1, early.** Twitch works end to end — login, live view, current
+> totals, daily history and per-stream statistics. Charts, automatic backups and
+> every other platform do not exist yet. Built in the open; expect the shape of
+> things to keep moving.
+
 ---
 
 ## Why
@@ -56,11 +61,6 @@ the failures, so a gap in a chart can be explained rather than merely noticed.
 
 Twitch is implemented. The collector is platform-agnostic: adding another means
 writing one class and one line of registration.
-
-### Not yet
-
-Charts over the collected history, automatic backups, and every platform other
-than Twitch.
 
 ## Stack
 
