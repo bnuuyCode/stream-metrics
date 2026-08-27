@@ -48,17 +48,4 @@ public final class SnapshotRepository {
                 .execute());
     }
 
-    /** Whether a given day already has this metric recorded. */
-    public boolean hasSnapshot(long accountId, MetricKey metric, LocalDate day) {
-        return jdbi.withHandle(h -> h
-                .createQuery("""
-                        SELECT COUNT(*) FROM metric_snapshot
-                        WHERE account_id = :accountId AND metric = :metric AND snapshot_date = :day
-                        """)
-                .bind("accountId", accountId)
-                .bind("metric", metric.key())
-                .bind("day", day.toString())
-                .mapTo(Integer.class)
-                .one()) > 0;
-    }
 }

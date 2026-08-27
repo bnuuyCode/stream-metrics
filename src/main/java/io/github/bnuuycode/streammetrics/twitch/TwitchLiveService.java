@@ -7,8 +7,7 @@ import io.github.bnuuycode.streammetrics.db.StreamRepository.LiveStats;
 import io.github.bnuuycode.streammetrics.db.StreamRepository.OpenSession;
 import io.github.bnuuycode.streammetrics.metrics.LiveTrackable.LiveSnapshot;
 import io.github.bnuuycode.streammetrics.web.ApiResponse;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import io.github.bnuuycode.streammetrics.web.FreshnessCache;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -27,17 +26,12 @@ import java.util.Optional;
  */
 public final class TwitchLiveService {
 
-    private static final Logger log = LoggerFactory.getLogger(TwitchLiveService.class);
-
-    /** Same window as the other live reads, for the same reason: rate limits. */
-    private static final Duration FRESH_FOR = Duration.ofSeconds(30);
-
-    private static final Duration STALE_LIMIT = Duration.ofMinutes(10);
-
     private final TwitchSession session;
     private final StreamRepository streams;
 
-    private volatile Cached cached;
+    /** Shorter window than the metrics cache: on air status changes faster. */
+    private final FreshnessCache cache = new FreshnessCache(
+            Duration.ofSeconds(30), Duration.ofMinutes(10), TwitchApiException::describe);
 
     public TwitchLiveService(TwitchSession session, StreamRepository streams) {
         this.session = session;
@@ -45,36 +39,43 @@ public final class TwitchLiveService {
     }
 
     public ApiResponse<LiveInfo> current() {
-        Instant now = Instant.now();
-
         Optional<StoredAccount> account = session.account();
         if (account.isEmpty()) {
-            return ApiResponse.error("No Twitch account connected", now);
+            return ApiResponse.error("No Twitch account connected", Instant.now());
         }
 
-        Cached snapshot = cached;
-        if (snapshot != null && age(snapshot, now).compareTo(FRESH_FOR) < 0) {
-            return ApiResponse.ok(describe(account.get(), snapshot.stream()), snapshot.fetchedAt());
-        }
+        StoredAccount stored = account.get();
 
-        try {
-            String token = session.accessToken(account.get());
-            Optional<LiveSnapshot> stream = session.client()
-                    .currentStream(account.get().externalId(), token);
+        // The cache holds the raw reading from Twitch; map turns it into what
+        // the dashboard needs while keeping the timestamp and status that
+        // reading actually earned.
+        return cache.<Optional<LiveSnapshot>>read("stream", () -> {
+            String token = session.accessToken(stored);
+            return session.client().currentStream(stored.externalId(), token);
+        }).map(stream -> describe(stored, stream));
+    }
 
-            cached = new Cached(stream, now);
-            return ApiResponse.ok(describe(account.get(), stream), now);
+    /**
+     * The last few finished broadcasts.
+     *
+     * <p>This is the historical path (DECISIONS.md § 4): read from our own
+     * database, which is the only place this information exists. Twitch keeps no
+     * such record — every row here is one the sampler wrote.
+     *
+     * <p>Still wrapped in a freshness envelope, even though a local read cannot
+     * really go stale. Consistency matters more than the exception: there is no
+     * endpoint in this application that answers without saying when.
+     */
+    public ApiResponse<List<Previous>> recent(int limit) {
+        Instant now = Instant.now();
 
-        } catch (RuntimeException e) {
-            log.warn("Could not read live status", e);
-
-            if (snapshot != null && age(snapshot, now).compareTo(STALE_LIMIT) < 0) {
-                return ApiResponse.stale(describe(account.get(), snapshot.stream()), snapshot.fetchedAt());
-            }
-
-            String reason = e instanceof TwitchApiException twitch ? twitch.explain() : String.valueOf(e.getMessage());
-            return ApiResponse.error(reason, now);
-        }
+        return session.account()
+                .map(account -> ApiResponse.ok(
+                        streams.findRecentSessions(account.id(), limit).stream()
+                                .map(this::toPrevious)
+                                .toList(),
+                        now))
+                .orElseGet(() -> ApiResponse.error("No Twitch account connected", now));
     }
 
     private LiveInfo describe(StoredAccount account, Optional<LiveSnapshot> stream) {
@@ -105,29 +106,6 @@ public final class TwitchLiveService {
         return new LiveInfo(false, null, lastFinished(account));
     }
 
-    /**
-     * The last few finished broadcasts.
-     *
-     * <p>This is the historical path (DECISIONS.md § 4): read from our own
-     * database, which is the only place this information exists. Twitch keeps no
-     * such record — every row here is one the sampler wrote.
-     *
-     * <p>Still wrapped in a freshness envelope, even though a local read cannot
-     * really go stale. Consistency matters more than the exception: there is no
-     * endpoint in this application that answers without saying when.
-     */
-    public ApiResponse<List<Previous>> recent(int limit) {
-        Instant now = Instant.now();
-
-        return session.account()
-                .map(account -> ApiResponse.ok(
-                        streams.findRecentSessions(account.id(), limit).stream()
-                                .map(this::toPrevious)
-                                .toList(),
-                        now))
-                .orElseGet(() -> ApiResponse.error("No Twitch account connected", now));
-    }
-
     private Previous lastFinished(StoredAccount account) {
         return streams.findLastFinishedSession(account.id())
                 .map(this::toPrevious)
@@ -144,15 +122,8 @@ public final class TwitchLiveService {
                 finished.avgViewers());
     }
 
-    private static Duration age(Cached cached, Instant now) {
-        return Duration.between(cached.fetchedAt(), now);
-    }
-
     private static String iso(Instant instant) {
         return instant == null ? null : DateTimeFormatter.ISO_INSTANT.format(instant);
-    }
-
-    private record Cached(Optional<LiveSnapshot> stream, Instant fetchedAt) {
     }
 
     /**

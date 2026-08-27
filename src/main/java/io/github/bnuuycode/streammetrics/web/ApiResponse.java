@@ -62,6 +62,22 @@ public final class ApiResponse<T> {
         return new ApiResponse<>(null, fetchedAt, Freshness.ERROR, message);
     }
 
+    /**
+     * Transforms the value while keeping the timestamp and status untouched.
+     *
+     * <p>Lets a cached raw reading become whatever the dashboard needs without
+     * a second code path that could report a different freshness than the one
+     * the value actually has. An ERROR carries no value, so there is nothing to
+     * transform and nothing is invented.
+     */
+    public <R> ApiResponse<R> map(java.util.function.Function<T, R> transform) {
+        return new ApiResponse<>(
+                value == null ? null : transform.apply(value),
+                fetchedAt,
+                status,
+                message);
+    }
+
     public T getValue() {
         return value;
     }

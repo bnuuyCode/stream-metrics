@@ -29,6 +29,10 @@ lives in the type so it cannot be forgotten on a tired evening.
 If a convenient shortcut would put a possibly-stale number on screen unlabelled,
 the shortcut is wrong — no matter how much simpler it is.
 
+The rule has exactly one implementation: `FreshnessCache`. Do not add per-service
+caching or staleness logic — two copies drifted apart once, and the rule is too
+central to maintain in two places.
+
 ## Conventions that are easy to break by accident
 
 - **Documentation and code comments in English.** Conversation with the user is

@@ -28,6 +28,19 @@ public final class TwitchApiException extends RuntimeException {
         return status;
     }
 
+    /**
+     * Turns any failure into something worth reading on the dashboard.
+     *
+     * <p>Static and public because every Twitch service needs it and none of
+     * them should carry its own copy.
+     */
+    public static String describe(RuntimeException e) {
+        if (e instanceof TwitchApiException twitch) {
+            return twitch.explain();
+        }
+        return e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+    }
+
     /** A human-readable reason, suited to being shown on the dashboard. */
     public String explain() {
         return switch (status) {

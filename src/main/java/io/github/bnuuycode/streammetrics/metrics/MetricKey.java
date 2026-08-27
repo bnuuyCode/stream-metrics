@@ -3,13 +3,14 @@ package io.github.bnuuycode.streammetrics.metrics;
 /**
  * The shared vocabulary of metric names.
  *
- * <p>Closed on purpose. If Twitch stores {@code followers} and YouTube stores
- * {@code subs}, the two can never be drawn on the same chart — and comparing
- * platforms side by side is the reason this project exists. An enum makes the
- * compiler enforce the shared vocabulary that free text would let drift apart.
+ * <p>Closed on purpose. If Twitch stored {@code followers} and YouTube stored
+ * {@code subs}, the two could never be drawn on the same chart — and comparing
+ * platforms side by side is the reason this project exists. Each platform's
+ * provider translates whatever its API calls a number into one of these.
  *
- * <p>Each platform's provider is responsible for translating whatever its API
- * calls a number into one of these.
+ * <p>Only metrics some provider actually emits belong here. A constant added
+ * for a platform that does not exist yet is a guess, and a guess in an enum
+ * looks exactly like a fact.
  */
 public enum MetricKey {
 
@@ -17,13 +18,7 @@ public enum MetricKey {
     FOLLOWERS("followers"),
 
     /** Paying subscribers or members. */
-    SUBSCRIBERS("subscribers"),
-
-    /** Lifetime views across the channel. */
-    TOTAL_VIEWS("total_views"),
-
-    /** How many videos, posts or clips exist. */
-    CONTENT_COUNT("content_count");
+    SUBSCRIBERS("subscribers");
 
     private final String key;
 

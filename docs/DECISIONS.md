@@ -384,6 +384,21 @@ than automatic discovery.
 from *when to collect, what to do on failure, and how to record it* (shared).
 The scheduler never learns that Twitch exists.
 
+### 12.1. This abstraction is unproven, and that is worth writing down
+
+`MetricsProvider` and `LiveTrackable` currently have **exactly one
+implementation** between them: `TwitchProvider`. That is textbook speculative
+generality — a seam shaped for platforms that do not exist yet.
+
+It is kept because the cost is small (about sixty lines of interface) and the
+decision was made deliberately rather than by reflex. But an abstraction with
+one implementation is a *guess about the future*, not a proven design, and
+recording it as though it were planning would be dishonest. Only the second
+provider will show whether the shape was right.
+
+If YouTube turns out not to fit it, the correct response is to reshape the
+interface, not to contort YouTube to match it.
+
 ---
 
 ## 13. What Twitch actually exposes

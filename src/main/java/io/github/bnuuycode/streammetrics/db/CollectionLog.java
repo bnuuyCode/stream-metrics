@@ -28,9 +28,6 @@ public final class CollectionLog {
     /** One row per live poll, per account. */
     public static final String LIVE_SAMPLE = "live_sample";
 
-    /** One row per token refresh. */
-    public static final String TOKEN_REFRESH = "token_refresh";
-
     private final Jdbi jdbi;
 
     public CollectionLog(Jdbi jdbi) {
@@ -63,11 +60,6 @@ public final class CollectionLog {
 
     public void succeeded(long runId) {
         finish(runId, "OK", null, null);
-    }
-
-    /** Nothing to do — for instance, a platform nobody has connected. */
-    public void skipped(long runId, String why) {
-        finish(runId, "SKIPPED", null, why);
     }
 
     public void failed(long runId, ErrorKind kind, String detail) {
