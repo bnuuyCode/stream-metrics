@@ -7,9 +7,9 @@ Runs entirely on your own machine. No account, no subscription, no data leaving
 the building.
 
 > **Status: 0.1, early.** Twitch works end to end — login, live view, current
-> totals, daily history and per-stream statistics. Charts, automatic backups and
-> every other platform do not exist yet. Built in the open; expect the shape of
-> things to keep moving.
+> totals, daily history, per-stream statistics and monthly aggregates. Charts,
+> automatic backups and every other platform do not exist yet. Built in the open;
+> expect the shape of things to keep moving.
 
 ---
 
@@ -51,6 +51,31 @@ The same principle runs through the storage layer. A day with no data has **no
 row** — never an interpolated one. Every collection attempt is logged, including
 the failures, so a gap in a chart can be explained rather than merely noticed.
 
+And it runs through the parser, which is where it was nearly lost: a JSON library
+will happily read a missing number as zero. A reply with no follower count was
+being stored as "0 followers" and shown as trustworthy. Every field is now
+required, and `0` and "no answer" are different facts with a test that keeps them
+apart.
+
+## Where the numbers come from
+
+Not every figure on the screen carries the same weight, so the interface says
+which is which.
+
+| | Source | Shown as |
+|---|---|---|
+| Followers, subscribers, growth | Twitch's own values | exact |
+| Streams, hours on air | Twitch's start times | exact |
+| Hours watched, average, peak | reconstructed from sampling | marked `~`, with a coverage figure |
+
+**Coverage** is samples actually taken against samples a complete recording would
+hold. It is reported plainly rather than blended into a confidence score — one
+number that mixes unrelated things sounds precise and cannot be questioned.
+
+It also states its own limit: coverage describes whether *this application's*
+sampling was complete. It claims nothing about whether Twitch's numbers were
+right.
+
 ## What it does today
 
 - **Live view** — on air status, current viewers, peak so far, uptime
@@ -58,6 +83,8 @@ the failures, so a gap in a chart can be explained rather than merely noticed.
 - **Daily history** — a snapshot per metric per day, kept forever
 - **Broadcast history** — duration, peak and average viewers per stream, built
   from samples taken every minute while live
+- **Monthly totals** — a closed calendar month added up, with follower growth
+  taken from two exact readings and audience figures carrying their coverage
 
 Twitch is implemented. The collector is platform-agnostic: adding another means
 writing one class and one line of registration.

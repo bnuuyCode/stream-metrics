@@ -429,6 +429,148 @@ Manual, monthly, and the only honest route. Not built yet.
 
 ---
 
+---
+
+## 14. A missing field is not a zero
+
+**Decision:** every field the application depends on must be present and of the
+right type. An absent or wrongly typed one is a broken response — recorded as a
+`PARSE` failure, shown as an error, never substituted with a default.
+
+**Why:** Jackson's `path()` returns an empty node for a field that is not there,
+and `asLong()` on an empty node returns **zero** without complaint. A reply that
+arrived with HTTP 200 but no `total` field was therefore read as "0 followers",
+written into permanent history, and displayed with a green OK badge — and the
+upsert then overwrote the correct value for that day.
+
+This project's whole subject is refusing to show numbers nobody measured, and
+the defect was sitting in the one layer nobody had audited: the parser. Two more
+instances of the same thing were found alongside it. A missing `expires_in` read
+as zero would mark a fresh token dead on arrival and loop the refresh logic. A
+missing `data` array in `/streams` was read as "offline", which would end a
+broadcast that was still running on the strength of a malformed reply.
+
+**The distinction that matters:** a stream genuinely watched by nobody records a
+real zero. `0` and "no answer" are different facts and the code now keeps them
+apart, with tests that fail if anyone merges them again.
+
+**Error messages** name the fields that were present but never quote their
+values. Some of these responses carry access tokens, and exception text reaches
+the logs.
+
+---
+
+## 15. When a live session is in doubt, ask — do not infer
+
+**Decision:** the startup routine does not decide whether a broadcast has ended
+by looking at the clock. It asks the platform whether the stream is still on
+air. If that question cannot be answered, nothing is closed.
+
+**Why:** a session can look abandoned simply because the application was closed
+for a while. Marking it finished and then continuing to append samples left a
+running broadcast recorded as over, with a summary frozen at the wrong moment.
+
+The asymmetry decides the default: **leaving a session open is recoverable** —
+the sampler sorts it out on the next poll. **Closing a running one is not** — its
+duration and summary are wrong permanently. Where the two errors are not equally
+costly, the cheap one is the correct guess.
+
+A session closed early is reopened rather than duplicated, and its stored summary
+is cleared. Peak and average computed at a premature close describe only part of
+a broadcast while looking like final figures, which is worse than having none.
+
+---
+
+## 16. Monthly totals: provenance and coverage
+
+**Decision:** the platform card carries a closed calendar month of totals, and
+distinguishes two kinds of number that were previously shown as equals.
+
+**Provenance.** Streams, hours on air, and follower and subscriber growth come
+from values Twitch itself reported — exact. Hours watched, average and peak are
+reconstructed from our own sampling — estimates, marked with a tilde. Growth over
+a period is the one figure in the summary that needs no caveat at all: it is the
+difference between two numbers Twitch gave us.
+
+**Coverage.** Samples actually taken against samples a complete recording would
+hold, shown as a pill with thresholds stated in the open (95% full, 70% partial).
+Deliberately not a single "confidence score" — one number that blends unrelated
+things sounds precise and cannot be interrogated.
+
+**What coverage does not claim.** It reports whether *our* sampling was complete.
+It says nothing about whether the numbers Twitch handed us were correct: a stream
+sampled perfectly from start to finish reads as full coverage even if every count
+was wrong at the source. We can be transparent about our own work; auditing
+theirs needs the VOD (§ 18).
+
+**A partial month says so.** When collection began after the month did, the
+summary names the date it started rather than crediting a whole month with four
+days of growth.
+
+**Merged duration is the sum of time on air**, not the span from first start to
+last end. Two broadcasts of one and four hours on the same day are five hours,
+not the seven that includes the break between them. The weighting falls out
+naturally, since no samples exist during a pause.
+
+---
+
+## 17. Merging broadcasts is never automatic
+
+**Status: decided, not yet implemented.**
+
+**Decision:** the application never merges two broadcasts on its own. It records
+them separately, notices when they might belong together, and waits.
+
+**Why:** the previous design merged automatically when a new stream id appeared
+within ten minutes. That guesses intent from timing, and timing does not carry
+intent — a connection dropping and a streamer deliberately ending one broadcast
+to start another look identical through the API. Only the person knows which
+happened.
+
+The direction of the default follows § 15's asymmetry. **Merging wrongly is
+invisible** — the numbers are simply wrong. **Splitting wrongly is obvious** —
+one evening appears as three short streams. Between a silent error and a loud
+one, this project takes the loud one every time.
+
+**The interface constraint is part of the decision, not a detail.** A pending
+merge lives in a permanent section of the dashboard until it is decided. Never a
+popup: someone mid-broadcast cannot stop to think about whether two sessions are
+one, and a prompt that appears and disappears forces the decision at the worst
+possible moment.
+
+**Shape:** one session per Twitch stream id, grouped by a nullable
+`merged_into_id`. Reversible, because a merge that cannot be undone is another
+irreversible guess. Combined figures survive sample pruning, since averages are
+weighted by the stored `sample_count`.
+
+---
+
+## 18. Data settles before it is final
+
+**Status: decided, not yet implemented.**
+
+**Decision:** a broadcast's figures are not treated as final the moment it ends.
+Sessions carry a state — `LIVE`, `SETTLING`, `FINAL` — and numbers still settling
+are shown marked as provisional.
+
+**Why:** Twitch keeps reporting a stream as live for some minutes after it
+actually ends, so the last samples of a session can be ghosts. Rather than
+guessing which trailing samples are real, the interface says the figures are not
+settled yet. This is the freshness rule applied to history: the uncertainty is
+labelled rather than hidden.
+
+**The VOD is the ground truth.** `/videos type=archive` carries the broadcast's
+real duration according to Twitch itself. When it appears, it corrects the end
+time and the ghost tail is discarded. Which method produced a session's end time
+is recorded, so every figure can be traced to how it was obtained.
+
+Two separate windows, previously conflated in one constant: a **grace** window
+answers "is this the same broadcast?", a **settle** window answers "have the
+numbers stopped moving?". They are not the same length and should never have
+shared a number.
+
+---
+
 ## Open questions
 
 - [ ] **Per-post data.** No table yet. It is what would most help decide what to
