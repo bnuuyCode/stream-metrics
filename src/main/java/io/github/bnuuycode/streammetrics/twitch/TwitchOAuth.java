@@ -113,16 +113,21 @@ public final class TwitchOAuth {
                 .build();
 
         JsonNode body = send(request);
-        JsonNode user = body.path("data").path(0);
+        JsonNode data = TwitchJson.requiredArray(body, "data");
 
-        if (user.isMissingNode()) {
-            throw new IllegalStateException("Twitch returned no user for this token");
+        if (data.isEmpty()) {
+            throw TwitchApiException.malformed("Twitch returned no user for this token");
         }
 
+        JsonNode user = data.get(0);
+
+        // The broadcaster id becomes account.external_id and every later metrics
+        // call depends on it. An empty string here would be stored and quietly
+        // break every request from then on.
         return new TwitchUser(
-                user.path("id").asText(),
-                user.path("login").asText(),
-                user.path("display_name").asText());
+                TwitchJson.requiredText(user, "id"),
+                TwitchJson.requiredText(user, "login"),
+                TwitchJson.requiredText(user, "display_name"));
     }
 
     private TwitchTokens parseTokens(JsonNode body) {
@@ -130,7 +135,13 @@ public final class TwitchOAuth {
         // dies. Storing the duration instead would mean recomputing "expired?"
         // against whenever it happened to be saved — a derived value waiting to
         // go stale (DECISIONS.md § 6.1).
-        long expiresIn = body.path("expires_in").asLong();
+        //
+        // Both fields are required rather than defaulted. A missing expires_in
+        // would read as zero, marking the token dead on arrival and sending the
+        // refresh logic into a loop; a missing access_token would be stored as
+        // an empty string and fail on every later call with no clue why.
+        long expiresIn = TwitchJson.requiredLong(body, "expires_in");
+        String accessToken = TwitchJson.requiredText(body, "access_token");
 
         // For user tokens "scope" is a JSON array; for app tokens it is absent.
         StringBuilder scopes = new StringBuilder();
@@ -142,8 +153,9 @@ public final class TwitchOAuth {
         }
 
         return new TwitchTokens(
-                body.path("access_token").asText(),
-                body.path("refresh_token").asText(null),
+                accessToken,
+                // Genuinely optional: Twitch does not always issue a new one.
+                TwitchJson.optionalText(body, "refresh_token"),
                 Instant.now().plusSeconds(expiresIn),
                 scopes.toString());
     }

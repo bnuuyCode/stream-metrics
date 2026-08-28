@@ -11,6 +11,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.Optional;
 
 /**
@@ -19,6 +20,10 @@ import java.util.Optional;
  * <p>Knows nothing about caching, tokens or freshness — it makes a call and
  * returns a number, or throws. Deciding what to show when it throws belongs one
  * layer up.
+ *
+ * <p>Every field this class reads goes through {@link TwitchJson}, which refuses
+ * to substitute a default for a field that is not there. See that class for why
+ * that matters more than it sounds.
  */
 public final class TwitchClient {
 
@@ -47,7 +52,7 @@ public final class TwitchClient {
         // first=1 asks for the smallest possible page: we only want the total,
         // not the list of names behind it.
         JsonNode body = get("/channels/followers?first=1&broadcaster_id=" + broadcasterId, accessToken);
-        return body.path("total").asLong();
+        return TwitchJson.requiredLong(body, "total");
     }
 
     /**
@@ -60,7 +65,7 @@ public final class TwitchClient {
      */
     public long subscribers(String broadcasterId, String accessToken) {
         JsonNode body = get("/subscriptions?first=1&broadcaster_id=" + broadcasterId, accessToken);
-        return body.path("total").asLong();
+        return TwitchJson.requiredLong(body, "total");
     }
 
     /**
@@ -70,21 +75,41 @@ public final class TwitchClient {
      * "asked, and the channel is offline", which is a real answer. Being unable
      * to ask throws instead, and the two must never be confused: treating a
      * network blip as "offline" would end a live session by mistake.
+     *
+     * <p>The same care applies to the shape of the reply. An empty {@code data}
+     * array is a genuine "offline". A <em>missing</em> {@code data} array is a
+     * broken response, and closing a running broadcast on the strength of one
+     * would be exactly the silent data loss this project refuses to accept.
      */
     public Optional<LiveTrackable.LiveSnapshot> currentStream(String broadcasterId, String accessToken) {
         JsonNode body = get("/streams?user_id=" + broadcasterId, accessToken);
-        JsonNode stream = body.path("data").path(0);
+        JsonNode data = TwitchJson.requiredArray(body, "data");
 
-        if (stream.isMissingNode() || stream.isNull()) {
+        if (data.isEmpty()) {
             return Optional.empty();
         }
 
+        JsonNode stream = data.get(0);
+
         return Optional.of(new LiveTrackable.LiveSnapshot(
-                stream.path("id").asText(),
-                Instant.parse(stream.path("started_at").asText()),
-                stream.path("title").asText(null),
-                stream.path("game_name").asText(null),
-                stream.path("viewer_count").asInt()));
+                TwitchJson.requiredText(stream, "id"),
+                startedAt(stream),
+                // Title and category can legitimately be blank.
+                TwitchJson.optionalText(stream, "title"),
+                TwitchJson.optionalText(stream, "game_name"),
+                TwitchJson.requiredInt(stream, "viewer_count")));
+    }
+
+    private static Instant startedAt(JsonNode stream) {
+        String raw = TwitchJson.requiredText(stream, "started_at");
+        try {
+            return Instant.parse(raw);
+        } catch (DateTimeParseException e) {
+            // A timestamp we cannot read is not a timestamp. Falling back to
+            // "now" would silently reset the duration of a broadcast already
+            // in progress.
+            throw TwitchApiException.malformed("Twitch sent an unreadable 'started_at'");
+        }
     }
 
     private JsonNode get(String path, String accessToken) {

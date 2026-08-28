@@ -107,6 +107,13 @@ public final class TwitchProvider implements MetricsProvider, LiveTrackable {
     }
 
     private static CollectionException translate(TwitchApiException e) {
+        // A reply that arrived but could not be read is its own category. It is
+        // the one failure that would otherwise look like success, so it must be
+        // recorded distinctly in collection_run rather than lumped into UNKNOWN.
+        if (e.isMalformed()) {
+            return new CollectionException(ErrorKind.PARSE, e.getMessage(), e);
+        }
+
         ErrorKind kind = switch (e.status()) {
             case 0 -> ErrorKind.NETWORK;
             case 401, 403 -> ErrorKind.AUTH;
