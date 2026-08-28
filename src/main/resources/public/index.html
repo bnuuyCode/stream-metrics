@@ -194,6 +194,69 @@
 
         .stat-note { font-size: 0.75rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 
+        /* --- month summary, inside the platform card --- */
+
+        .month {
+            margin-top: 1.25rem;
+            padding-top: 1rem;
+            border-top: 1px solid var(--border);
+        }
+
+        .month-head {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 1rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .month-label {
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--muted);
+        }
+
+        /* Coverage is not freshness, so it gets its own pill. It answers a
+           different question: not "when was this read" but "how much of what
+           should have been measured actually was". */
+        .coverage {
+            font-size: 0.7rem;
+            font-weight: 600;
+            letter-spacing: 0.03em;
+            padding: 0.15rem 0.5rem;
+            border-radius: 999px;
+            border: 1px solid currentColor;
+            white-space: nowrap;
+        }
+
+        .coverage.full    { color: var(--ok); }
+        .coverage.partial { color: var(--stale); }
+        .coverage.low     { color: var(--error); }
+        .coverage.none    { color: var(--muted); }
+
+        .month-grid {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 0.45rem 1.25rem;
+            font-size: 0.875rem;
+        }
+
+        .month-grid .k { color: var(--muted); }
+        .month-grid .v { text-align: right; font-variant-numeric: tabular-nums; color: var(--heading); }
+
+        /* A tilde is doing real work here: it separates a figure Twitch gave us
+           from one we reconstructed by sampling. */
+        .month-grid .v.est::before { content: "~"; color: var(--muted); margin-right: 0.1em; }
+
+        .month-note {
+            margin: 0.9rem 0 0;
+            font-size: 0.75rem;
+            line-height: 1.45;
+            color: var(--muted);
+        }
+
         /* --- recent streams table --- */
 
         /* Wide content scrolls inside its own box rather than pushing the page
@@ -516,7 +579,98 @@
         return document.createTextNode(value);
     }
 
-    function renderTwitch(status, metrics) {
+    function hoursAndMinutes(totalMinutes) {
+        const h = Math.floor(totalMinutes / 60);
+        const m = totalMinutes % 60;
+        if (h === 0) return m + 'min';
+        return m === 0 ? h + 'h' : h + 'h ' + m + 'min';
+    }
+
+    function signed(n) {
+        return (n > 0 ? '+' : '') + Number(n).toLocaleString();
+    }
+
+    function shortDate(iso) {
+        return new Date(iso + 'T00:00:00').toLocaleDateString(undefined, { day: '2-digit', month: 'short' });
+    }
+
+    /**
+     * The month added up, inside the platform card.
+     *
+     * Two kinds of number live here and they are not equal. Streams, hours on
+     * air and both growth figures come from Twitch's own values — exact. Hours
+     * watched, average and peak are reconstructed from our sampling, and are
+     * marked with a tilde and governed by the coverage pill.
+     */
+    function monthBlock(summary) {
+        const block = document.createElement('div');
+        block.className = 'month';
+
+        const head = document.createElement('div');
+        head.className = 'month-head';
+
+        const label = document.createElement('span');
+        label.className = 'month-label';
+        label.textContent = summary.label;
+
+        const level = (summary.coverage?.level || 'NONE').toLowerCase();
+        const pct = summary.coverage?.percent;
+
+        const cov = document.createElement('span');
+        cov.className = 'coverage ' + level;
+        cov.textContent = pct === null || pct === undefined
+            ? 'no coverage data'
+            : level + ' coverage · ' + pct + '%';
+
+        head.append(label, cov);
+
+        const grid = document.createElement('div');
+        grid.className = 'month-grid';
+
+        const rows = [
+            ['Streams', String(summary.streamCount), false],
+            ['Hours on air', hoursAndMinutes(summary.onAirMinutes), false],
+            ['Hours watched', hoursAndMinutes(summary.viewerMinutes), true],
+            ['Avg viewers', summary.averageViewers != null ? summary.averageViewers.toFixed(1) : '—', true],
+            ['Peak', summary.peakViewers != null ? Number(summary.peakViewers).toLocaleString() : '—', true]
+        ];
+
+        if (summary.followers) {
+            rows.push(['Followers', signed(summary.followers.delta), false]);
+        }
+        if (summary.subscribers) {
+            rows.push(['Subscribers', signed(summary.subscribers.delta), false]);
+        }
+
+        rows.forEach(([k, v, estimated]) => {
+            const key = document.createElement('span');
+            key.className = 'k';
+            key.textContent = k;
+
+            const val = document.createElement('span');
+            val.className = 'v' + (estimated ? ' est' : '');
+            val.textContent = v;
+
+            grid.append(key, val);
+        });
+
+        block.append(head, grid);
+
+        // Say out loud where measurement actually began, rather than letting a
+        // partial month read as a whole one.
+        const partial = summary.followers?.partial ? summary.followers : null;
+        if (partial) {
+            const note = document.createElement('p');
+            note.className = 'month-note';
+            note.textContent = 'Growth measured from ' + shortDate(partial.sinceDate)
+                + ', when collection started — not from the first of the month.';
+            block.append(note);
+        }
+
+        return block;
+    }
+
+    function renderTwitch(status, metrics, month) {
         paintBadge(document.getElementById('twitch-badge'), status.status);
         const body = document.getElementById('twitch-body');
         const info = status.value;
@@ -558,6 +712,12 @@
         );
 
         body.replaceChildren(channel, stats);
+
+        // Only when the month actually has something to add up. An empty block
+        // of dashes says nothing and takes space.
+        if (month && month.value) {
+            body.append(monthBlock(month.value));
+        }
     }
 
     function renderSessions(response) {
@@ -651,7 +811,7 @@
     }
 
     async function load() {
-        const [health, twitchStatus, twitchMetrics, live, sessions] = await Promise.all([
+        const [health, twitchStatus, twitchMetrics, live, sessions, month] = await Promise.all([
             get('/api/health').catch(e => failed(e.message)),
             get('/api/twitch/status').catch(e => failed(e.message)),
             get('/api/twitch/metrics').catch(e => {
@@ -659,11 +819,12 @@
                 return { followers: envelope, subscribers: envelope };
             }),
             get('/api/twitch/live').catch(e => failed(e.message)),
-            get('/api/twitch/sessions?limit=5').catch(e => failed(e.message))
+            get('/api/twitch/sessions?limit=5').catch(e => failed(e.message)),
+            get('/api/twitch/month').catch(e => failed(e.message))
         ]);
 
         renderStream(live);
-        renderTwitch(twitchStatus, twitchMetrics);
+        renderTwitch(twitchStatus, twitchMetrics, month);
         renderSessions(sessions);
         renderHealth(health);
     }

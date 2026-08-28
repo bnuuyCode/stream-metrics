@@ -2,6 +2,7 @@ package io.github.bnuuycode.streammetrics.collector;
 
 import io.github.bnuuycode.streammetrics.db.CollectionLog;
 import io.github.bnuuycode.streammetrics.db.StreamRepository;
+import io.github.bnuuycode.streammetrics.db.StreamRepository.ExistingSession;
 import io.github.bnuuycode.streammetrics.db.StreamRepository.OpenSession;
 import io.github.bnuuycode.streammetrics.metrics.CollectionException;
 import io.github.bnuuycode.streammetrics.metrics.LiveTrackable;
@@ -144,10 +145,26 @@ public final class LiveSampler implements Runnable {
         long sessionId;
 
         if (open.isEmpty()) {
-            log.info("Live detected: \"{}\" ({})", snapshot.title(), snapshot.category());
-            sessionId = streams.openSession(
-                    accountId, snapshot.streamId(), snapshot.startedAt(),
-                    snapshot.title(), snapshot.category());
+            Optional<ExistingSession> existing =
+                    streams.findSessionByStreamId(accountId, snapshot.streamId());
+
+            if (existing.isPresent() && existing.get().isClosed()) {
+                // This broadcast was marked as finished while it was in fact
+                // still running — long enough offline to look abandoned. Putting
+                // it back on air is right; opening a second session for the same
+                // stream id would split one broadcast in two and throw away the
+                // samples already collected.
+                streams.reopenSession(existing.get().id());
+                sessionId = existing.get().id();
+                log.info("Session {} was closed early but is still live — reopened",
+                        snapshot.streamId());
+
+            } else {
+                log.info("Live detected: \"{}\" ({})", snapshot.title(), snapshot.category());
+                sessionId = streams.openSession(
+                        accountId, snapshot.streamId(), snapshot.startedAt(),
+                        snapshot.title(), snapshot.category());
+            }
 
         } else if (streams.hasSegment(open.get().id(), snapshot.streamId())) {
             // Same segment as last poll. The ordinary case.
@@ -216,10 +233,46 @@ public final class LiveSampler implements Runnable {
     public void closeAbandonedSessions() {
         Instant cutoff = Instant.now().minus(GRACE);
 
-        for (OpenSession session : streams.findStaleOpenSessions(cutoff)) {
-            Instant endedAt = streams.lastSampleAt(session.id()).orElse(session.startedAt());
-            streams.closeSession(session.id(), endedAt);
-            log.info("Closed abandoned session {} (ended {})", session.streamId(), endedAt);
+        for (Tracked entry : tracked) {
+            Optional<Long> accountId = entry.provider().accountId();
+            if (accountId.isEmpty()) {
+                continue;
+            }
+
+            List<OpenSession> stale = streams.findStaleOpenSessions(accountId.get(), cutoff);
+            if (stale.isEmpty()) {
+                continue;
+            }
+
+            // Ask the platform instead of trusting the clock. A session can look
+            // abandoned simply because the application was closed for a while,
+            // and the broadcast may still be running.
+            Optional<LiveSnapshot> current;
+            try {
+                current = entry.live().currentStream();
+            } catch (CollectionException e) {
+                // Could not ask. Leaving a session open is recoverable — the
+                // sampler will sort it out on the next poll. Closing a running
+                // broadcast is not: its duration and summary would be wrong
+                // permanently. When in doubt, do nothing.
+                log.warn("Could not verify live status at startup for {} [{}] — leaving {} session(s) open",
+                        entry.provider().platform(), e.kind(), stale.size());
+                continue;
+            }
+
+            String liveStreamId = current.map(LiveSnapshot::streamId).orElse(null);
+
+            for (OpenSession session : stale) {
+                if (session.streamId().equals(liveStreamId)) {
+                    log.info("Session {} looked abandoned but is still on air — left open",
+                            session.streamId());
+                    continue;
+                }
+
+                Instant endedAt = streams.lastSampleAt(session.id()).orElse(session.startedAt());
+                streams.closeSession(session.id(), endedAt);
+                log.info("Closed abandoned session {} (ended {})", session.streamId(), endedAt);
+            }
         }
     }
 

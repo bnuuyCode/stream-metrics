@@ -10,6 +10,7 @@ import io.github.bnuuycode.streammetrics.db.Database;
 import io.github.bnuuycode.streammetrics.db.SnapshotRepository;
 import io.github.bnuuycode.streammetrics.db.StreamRepository;
 import io.github.bnuuycode.streammetrics.metrics.MetricsProvider;
+import io.github.bnuuycode.streammetrics.metrics.MonthlySummary;
 import io.github.bnuuycode.streammetrics.twitch.TwitchLiveService;
 import io.github.bnuuycode.streammetrics.twitch.TwitchMetricsService;
 import io.github.bnuuycode.streammetrics.twitch.TwitchProvider;
@@ -43,6 +44,7 @@ public final class Main {
         SnapshotRepository snapshots = new SnapshotRepository(database.jdbi());
         StreamRepository streams = new StreamRepository(database.jdbi());
         CollectionLog runs = new CollectionLog(database.jdbi());
+        MonthlySummary monthly = new MonthlySummary(streams, snapshots, config.zone());
 
         // ------------------------------------------------------------------
         // Platform registry.
@@ -105,6 +107,14 @@ public final class Main {
                     .map(live -> live.recent(limit))
                     .orElseGet(() -> ApiResponse.error("Twitch is not configured", Instant.now())));
         });
+
+        // The month added up. Built entirely from data this application
+        // collected, so it carries its own coverage.
+        app.get("/api/twitch/month", ctx -> ctx.json(
+                accounts.findAccount(TwitchSession.PLATFORM)
+                        .map(account -> ApiResponse.ok(
+                                monthly.currentMonth(account.id()), Instant.now()))
+                        .orElseGet(() -> ApiResponse.error("No Twitch account connected", Instant.now()))));
 
         new AuthRoutes(config, accounts).register(app);
 

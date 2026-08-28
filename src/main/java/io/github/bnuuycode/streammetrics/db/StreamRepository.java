@@ -4,6 +4,7 @@ import org.jdbi.v3.core.Jdbi;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
@@ -240,6 +241,94 @@ public final class StreamRepository {
                 .list());
     }
 
+    /**
+     * Any session for this Twitch stream id, open or already closed.
+     *
+     * <p>Needed because a session can be closed while the broadcast is in fact
+     * still running — the application being shut down for a while is enough.
+     * When the same stream id turns up again, it must be recognised as the
+     * session it is rather than treated as unknown.
+     */
+    public Optional<ExistingSession> findSessionByStreamId(long accountId, String streamId) {
+        return jdbi.withHandle(h -> h
+                .createQuery("""
+                        SELECT id, external_stream_id, started_at, ended_at
+                        FROM stream_session
+                        WHERE account_id = :accountId AND external_stream_id = :streamId
+                        """)
+                .bind("accountId", accountId)
+                .bind("streamId", streamId)
+                .map((rs, ctx) -> new ExistingSession(
+                        rs.getLong("id"),
+                        rs.getString("external_stream_id"),
+                        instant(rs, "started_at"),
+                        instant(rs, "ended_at")))
+                .findOne());
+    }
+
+    /**
+     * Puts a session back on air.
+     *
+     * <p>The stored summary is cleared along with {@code ended_at}: peak and
+     * average computed at the premature close describe only part of the
+     * broadcast, and leaving them behind would be worse than having none — they
+     * look like finished figures. They are recomputed when the session really
+     * ends.
+     */
+    public void reopenSession(long sessionId) {
+        jdbi.useHandle(h -> h
+                .createUpdate("""
+                        UPDATE stream_session SET
+                            ended_at = NULL,
+                            peak_viewers = NULL,
+                            avg_viewers = NULL,
+                            sample_count = NULL
+                        WHERE id = :id
+                        """)
+                .bind("id", sessionId)
+                .execute());
+
+        jdbi.useHandle(h -> h
+                .createUpdate("UPDATE stream_segment SET ended_at = NULL WHERE session_id = :id")
+                .bind("id", sessionId)
+                .execute());
+    }
+
+    /**
+     * Finished broadcasts that started inside a window.
+     *
+     * <p>Compared as text rather than through SQLite's date functions. ISO-8601
+     * sorts correctly in plain lexicographic order, which is exactly why the
+     * schema stores timestamps that way — no parsing, no timezone surprises in
+     * the query itself.
+     *
+     * <p>Returns the rows and lets the caller add them up in Java. A month holds
+     * a few dozen broadcasts at most, and arithmetic that can be read beats
+     * arithmetic hidden in SQL.
+     */
+    public List<SessionTotals> findSessionsBetween(long accountId, Instant from, Instant to) {
+        return jdbi.withHandle(h -> h
+                .createQuery("""
+                        SELECT started_at, ended_at, peak_viewers, avg_viewers, sample_count
+                        FROM stream_session
+                        WHERE account_id = :accountId
+                          AND ended_at IS NOT NULL
+                          AND started_at >= :from
+                          AND started_at < :to
+                        ORDER BY started_at
+                        """)
+                .bind("accountId", accountId)
+                .bind("from", text(from))
+                .bind("to", text(to))
+                .map((rs, ctx) -> new SessionTotals(
+                        instant(rs, "started_at"),
+                        instant(rs, "ended_at"),
+                        rs.getObject("peak_viewers") == null ? null : rs.getLong("peak_viewers"),
+                        rs.getObject("avg_viewers") == null ? null : rs.getDouble("avg_viewers"),
+                        rs.getObject("sample_count") == null ? 0 : rs.getInt("sample_count")))
+                .list());
+    }
+
     /** When the last sample of a session was taken. */
     public Optional<Instant> lastSampleAt(long sessionId) {
         return jdbi.withHandle(h -> h
@@ -256,16 +345,18 @@ public final class StreamRepository {
      * <p>Without this, {@code ended_at} stays NULL forever and the session shows
      * as live for eternity (DECISIONS.md § 11).
      */
-    public List<OpenSession> findStaleOpenSessions(Instant cutoff) {
+    public List<OpenSession> findStaleOpenSessions(long accountId, Instant cutoff) {
         return jdbi.withHandle(h -> h
                 .createQuery("""
                         SELECT s.id, s.external_stream_id, s.started_at
                         FROM stream_session s
-                        WHERE s.ended_at IS NULL
+                        WHERE s.account_id = :accountId
+                          AND s.ended_at IS NULL
                           AND COALESCE(
                                 (SELECT MAX(sampled_at) FROM viewer_sample WHERE session_id = s.id),
                                 s.started_at) < :cutoff
                         """)
+                .bind("accountId", accountId)
                 .bind("cutoff", text(cutoff))
                 .map((rs, ctx) -> new OpenSession(
                         rs.getLong("id"),
@@ -290,8 +381,58 @@ public final class StreamRepository {
     public record OpenSession(long id, String streamId, Instant startedAt) {
     }
 
+    /**
+     * A session that exists, whether or not it has been closed.
+     *
+     * @param endedAt null while on air
+     */
+    public record ExistingSession(long id, String streamId, Instant startedAt, Instant endedAt) {
+
+        public boolean isClosed() {
+            return endedAt != null;
+        }
+    }
+
     /** Running totals of a broadcast still in progress. */
     public record LiveStats(long peakViewers, int sampleCount) {
+    }
+
+    /**
+     * One finished broadcast reduced to the figures a monthly total needs.
+     *
+     * <p>Note it carries the stored summary rather than the raw samples. That is
+     * deliberate: samples are deleted at ninety days, so a total computed from
+     * them would quietly start shrinking as history ages. Built from the summary,
+     * a month from last year adds up the same as it did the day it closed.
+     */
+    public record SessionTotals(
+            Instant startedAt,
+            Instant endedAt,
+            Long peakViewers,
+            Double avgViewers,
+            int sampleCount) {
+
+        public Duration onAir() {
+            return Duration.between(startedAt, endedAt);
+        }
+
+        /**
+         * Viewers multiplied by minutes watched — the closest honest answer to
+         * "how much audience did this broadcast get".
+         *
+         * <p>An estimate, and it says so. Each sample stands for roughly one
+         * minute at that viewer count, so the product of the average and the
+         * number of samples reconstructs the area under the curve. It is only as
+         * complete as the sampling was, which is why coverage travels beside it.
+         */
+        public double viewerMinutes() {
+            return avgViewers == null ? 0 : avgViewers * sampleCount;
+        }
+
+        /** How many samples a complete recording of this broadcast would hold. */
+        public long expectedSamples() {
+            return Math.max(1, onAir().toMinutes());
+        }
     }
 
     /** A broadcast that has ended, with its stored summary. */

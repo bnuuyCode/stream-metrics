@@ -3,6 +3,7 @@ package io.github.bnuuycode.streammetrics.web;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.Objects;
+import java.util.function.Function;
 
 /**
  * The envelope every single API response in this project travels in.
@@ -70,7 +71,7 @@ public final class ApiResponse<T> {
      * the value actually has. An ERROR carries no value, so there is nothing to
      * transform and nothing is invented.
      */
-    public <R> ApiResponse<R> map(java.util.function.Function<T, R> transform) {
+    public <R> ApiResponse<R> map(Function<T, R> transform) {
         return new ApiResponse<>(
                 value == null ? null : transform.apply(value),
                 fetchedAt,

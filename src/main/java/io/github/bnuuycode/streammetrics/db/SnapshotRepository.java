@@ -6,9 +6,11 @@ import org.jdbi.v3.core.Jdbi;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
+import java.util.Optional;
 
 /**
- * Writes the daily history.
+ * Writes and reads the daily history.
  *
  * <p>The log of collection attempts lives in {@link CollectionLog}, separately:
  * one class records what was measured, the other records that measuring was
@@ -48,4 +50,57 @@ public final class SnapshotRepository {
                 .execute());
     }
 
+    /**
+     * How much a metric moved across a date range.
+     *
+     * <p>Exact, unlike anything derived from sampling: both ends are numbers
+     * Twitch itself reported, and the difference between them is arithmetic.
+     * In a monthly summary this is the one figure that needs no caveat.
+     *
+     * <p>Empty when the range holds fewer than two readings. One point is not a
+     * change, and reporting "+0" would state something nobody measured.
+     */
+    public Optional<Growth> growthBetween(long accountId, MetricKey metric, LocalDate from, LocalDate to) {
+        List<Reading> readings = jdbi.withHandle(h -> h
+                .createQuery("""
+                        SELECT snapshot_date, value
+                        FROM metric_snapshot
+                        WHERE account_id = :accountId
+                          AND metric = :metric
+                          AND snapshot_date >= :from
+                          AND snapshot_date < :to
+                        ORDER BY snapshot_date
+                        """)
+                .bind("accountId", accountId)
+                .bind("metric", metric.key())
+                .bind("from", from.toString())
+                .bind("to", to.toString())
+                .map((rs, ctx) -> new Reading(rs.getString("snapshot_date"), rs.getLong("value")))
+                .list());
+
+        if (readings.size() < 2) {
+            return Optional.empty();
+        }
+
+        Reading first = readings.get(0);
+        Reading last = readings.get(readings.size() - 1);
+
+        return Optional.of(new Growth(first.date(), first.value(), last.date(), last.value()));
+    }
+
+    private record Reading(String date, long value) {
+    }
+
+    /**
+     * @param fromDate the first day actually recorded, which may fall later than
+     *                 the start of the range. Carried so the interface can say
+     *                 "since the 27th" rather than implying a whole month was
+     *                 measured when collection only began partway through.
+     */
+    public record Growth(String fromDate, long fromValue, String toDate, long toValue) {
+
+        public long delta() {
+            return toValue - fromValue;
+        }
+    }
 }
