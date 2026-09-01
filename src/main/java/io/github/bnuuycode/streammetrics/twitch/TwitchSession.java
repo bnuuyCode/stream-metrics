@@ -4,6 +4,7 @@ import io.github.bnuuycode.streammetrics.config.AppConfig.TwitchConfig;
 import io.github.bnuuycode.streammetrics.db.AccountRepository;
 import io.github.bnuuycode.streammetrics.db.AccountRepository.StoredAccount;
 import io.github.bnuuycode.streammetrics.db.AccountRepository.StoredToken;
+import io.github.bnuuycode.streammetrics.metrics.ClockSkew;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -30,10 +31,13 @@ public final class TwitchSession {
     private final TwitchOAuth oauth;
     private final TwitchClient client;
 
-    public TwitchSession(TwitchConfig config, AccountRepository accounts) {
+    public TwitchSession(TwitchConfig config,
+                         AccountRepository accounts,
+                         RateLimitGate rateLimit,
+                         ClockSkew clockSkew) {
         this.accounts = accounts;
         this.oauth = new TwitchOAuth(config);
-        this.client = new TwitchClient(config.clientId());
+        this.client = new TwitchClient(config.clientId(), rateLimit, clockSkew);
     }
 
     public TwitchClient client() {

@@ -2,21 +2,27 @@ package io.github.bnuuycode.streammetrics;
 
 import io.github.bnuuycode.streammetrics.collector.Collector;
 import io.github.bnuuycode.streammetrics.collector.LiveSampler;
+import io.github.bnuuycode.streammetrics.collector.SettleJob;
 import io.github.bnuuycode.streammetrics.collector.SnapshotJob;
 import io.github.bnuuycode.streammetrics.config.AppConfig;
 import io.github.bnuuycode.streammetrics.db.AccountRepository;
 import io.github.bnuuycode.streammetrics.db.CollectionLog;
 import io.github.bnuuycode.streammetrics.db.Database;
+import io.github.bnuuycode.streammetrics.db.MergeSuggestionRepository;
 import io.github.bnuuycode.streammetrics.db.SnapshotRepository;
 import io.github.bnuuycode.streammetrics.db.StreamRepository;
+import io.github.bnuuycode.streammetrics.metrics.ClockSkew;
 import io.github.bnuuycode.streammetrics.metrics.MetricsProvider;
 import io.github.bnuuycode.streammetrics.metrics.MonthlySummary;
+import io.github.bnuuycode.streammetrics.twitch.RateLimitGate;
 import io.github.bnuuycode.streammetrics.twitch.TwitchLiveService;
 import io.github.bnuuycode.streammetrics.twitch.TwitchMetricsService;
 import io.github.bnuuycode.streammetrics.twitch.TwitchProvider;
 import io.github.bnuuycode.streammetrics.twitch.TwitchSession;
 import io.github.bnuuycode.streammetrics.web.ApiResponse;
 import io.github.bnuuycode.streammetrics.web.AuthRoutes;
+import io.github.bnuuycode.streammetrics.web.MergeRoutes;
+import io.github.bnuuycode.streammetrics.web.SystemStatus;
 import io.javalin.Javalin;
 import io.javalin.http.staticfiles.Location;
 
@@ -44,7 +50,13 @@ public final class Main {
         SnapshotRepository snapshots = new SnapshotRepository(database.jdbi());
         StreamRepository streams = new StreamRepository(database.jdbi());
         CollectionLog runs = new CollectionLog(database.jdbi());
+        MergeSuggestionRepository merges = new MergeSuggestionRepository(database.jdbi());
         MonthlySummary monthly = new MonthlySummary(streams, snapshots, config.zone());
+
+        // Shared by everything that talks to Twitch: the quota is per
+        // application, and the clock is one machine.
+        RateLimitGate rateLimit = new RateLimitGate();
+        ClockSkew clockSkew = new ClockSkew();
 
         // ------------------------------------------------------------------
         // Platform registry.
@@ -55,15 +67,19 @@ public final class Main {
         // ------------------------------------------------------------------
         List<MetricsProvider> providers = new ArrayList<>();
         List<LiveSampler.Tracked> trackable = new ArrayList<>();
+        List<SettleJob.Archivable> archivable = new ArrayList<>();
 
         Optional<TwitchSession> twitchSession = config.twitch()
-                .map(twitch -> new TwitchSession(twitch, accounts));
+                .map(twitch -> new TwitchSession(twitch, accounts, rateLimit, clockSkew));
 
         twitchSession.ifPresent(session -> {
             TwitchProvider provider = new TwitchProvider(session);
             providers.add(provider);
             // Twitch broadcasts, so it goes in both lists.
             trackable.add(new LiveSampler.Tracked(provider, provider));
+            // And it keeps archives, which is the only authority on when a
+            // broadcast really ended.
+            archivable.add(new SettleJob.Archivable(provider, provider));
         });
 
         Optional<TwitchMetricsService> twitchMetrics = twitchSession.map(TwitchMetricsService::new);
@@ -83,7 +99,10 @@ public final class Main {
         // very first endpoint, nothing leaves this application without a
         // timestamp attached.
         app.get("/api/health", ctx ->
-                ctx.json(ApiResponse.ok(database.status(), Instant.now())));
+                ctx.json(ApiResponse.ok(new SystemStatus(
+                        database.status(),
+                        clockSkew.current().orElse(null),
+                        rateLimit.status().orElse(null)), Instant.now())));
 
         // The live path: current numbers, fetched on demand (DECISIONS.md § 4).
         app.get("/api/twitch/metrics", ctx -> ctx.json(
@@ -117,6 +136,7 @@ public final class Main {
                         .orElseGet(() -> ApiResponse.error("No Twitch account connected", Instant.now()))));
 
         new AuthRoutes(config, accounts).register(app);
+        new MergeRoutes(accounts, streams, merges).register(app);
 
         app.start(config.port());
 
@@ -126,7 +146,8 @@ public final class Main {
         // ------------------------------------------------------------------
         Collector collector = new Collector(
                 new SnapshotJob(providers, snapshots, runs, config.zone()),
-                new LiveSampler(trackable, streams, runs));
+                new LiveSampler(trackable, streams, merges, runs),
+                new SettleJob(archivable, streams));
 
         collector.start();
 

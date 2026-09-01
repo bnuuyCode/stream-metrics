@@ -4,7 +4,7 @@ A record of the decisions made before the first line of code was written, along
 with the reasoning behind each one. Anyone arriving later (including me, six
 months from now) should read this before proposing a change of direction.
 
-Last reviewed: 2026-08-27
+Last reviewed: 2026-09-01
 
 ---
 
@@ -516,7 +516,10 @@ naturally, since no samples exist during a pause.
 
 ## 17. Merging broadcasts is never automatic
 
-**Status: decided, not yet implemented.**
+**Status: implemented.** Verified against a real broadcast that dropped and
+resumed: two sessions recorded separately, one suggestion raised, merged by hand,
+and the combined duration came out as the sum of both parts rather than the span
+including the pause between them.
 
 **Decision:** the application never merges two broadcasts on its own. It records
 them separately, notices when they might belong together, and waits.
@@ -543,11 +546,30 @@ possible moment.
 irreversible guess. Combined figures survive sample pruning, since averages are
 weighted by the stored `sample_count`.
 
+**Nothing is offered while a broadcast is still running.** The first version got
+this wrong in an obvious way: the same reasoning that rules out a pop-up rules
+out asking mid-stream, and the card appeared the moment a second broadcast
+began — which is to say, while the person was working.
+
+There is a second reason beyond timing. A running broadcast has no duration, no
+average and no peak yet, so the decision would be made about figures that do not
+exist. The suggestion is still recorded when it is noticed; it simply waits until
+the evening can be judged whole.
+
+Enforced on the server as well as hidden in the interface. A rule that matters is
+a rule the server keeps.
+
+**A bad night arrives as one question.** Three drops produce three pairs, and
+presenting those as three separate cards turns one judgement into a form. The
+pairs are joined into the run of broadcasts they describe, shown in order with
+the silence between each, and answered once — with the unwanted ones unticked.
+
 ---
 
 ## 18. Data settles before it is final
 
-**Status: decided, not yet implemented.**
+**Status: implemented.** The state machine has run; the archive comparison is
+described in § 18.2.
 
 **Decision:** a broadcast's figures are not treated as final the moment it ends.
 Sessions carry a state — `LIVE`, `SETTLING`, `FINAL` — and numbers still settling
@@ -568,6 +590,134 @@ Two separate windows, previously conflated in one constant: a **grace** window
 answers "is this the same broadcast?", a **settle** window answers "have the
 numbers stopped moving?". They are not the same length and should never have
 shared a number.
+
+### 18.3. Three windows, and why none of them may share a number
+
+A third turned up the same way, and the lesson repeated: constants that answer
+different questions must not be tied together, however similar their values look
+on the day they are written.
+
+| window | question it answers | value | where it comes from |
+|---|---|---|---|
+| **Grace** | how long might Twitch still resume this same broadcast? | 2 min | Twitch tolerates 90 seconds of lost connection |
+| **Suggest** | how far apart can two broadcasts be and still be one evening? | 10 min | the streamer's judgement |
+| **Settle** | have the numbers stopped moving? | 20 min | how long an archive takes to appear |
+
+Grace was ten minutes, from when it decided whether an evening stayed in one
+piece. It no longer decides that: merging became a person's choice, and a
+broadcast returning under the same id is reopened whether or not its session had
+closed. Closing early now costs a row that briefly reads as finished; what the
+long wait cost was ten minutes of watching a dashboard after every broadcast.
+
+**Grace and suggest had been written as the same constant.** Shortening one would
+have silently narrowed the other, and broadcasts five minutes apart would have
+stopped being offered for merging at all — a change nobody asked for, arriving
+as a side effect, discovered only when a night went unmerged. They are separate
+constants now because they measure separate things.
+
+---
+
+---
+
+## 18.1. The collector polls once a minute, on air or not
+
+**Decision:** one poll per minute, always. No slower cadence while off air.
+
+**Why the change:** it used to drop to five minutes between broadcasts, to be
+polite about the API. That politeness cost up to five minutes of every
+broadcast — a stream starting just after a poll goes unsampled until the next
+one, and **nobody can measure the past**. No platform keeps per-minute viewer
+counts for anyone to query later, which is the entire reason this application
+exists. Those minutes are gone for good.
+
+And the saving was imaginary. Twitch's limit is per minute, not per day, so one
+call a minute spends roughly a tenth of one percent of it. A real cost in data
+quality had been traded for a rounding error.
+
+**Accepted trade-off:** `collection_run` grows to around 1,400 rows a day rather
+than a few hundred — a few megabytes before the ninety-day prune, which is more
+than the rest of the database put together and still nothing in absolute terms.
+
+**What this does not fix:** the gap is now at most one minute rather than five,
+never zero. A broadcast that starts between two polls is still unmeasured until
+the next one, and sampling once a minute cannot see a spike that lasts forty
+seconds. Both are reported rather than hidden: coverage counts samples taken
+against the broadcast's real length, so whatever is missed shows up as a number
+instead of being quietly rounded away.
+
+**Also removed:** the adaptive cadence took the live/off-air state with it. Once
+the interval stopped depending on it, that state had no reader left.
+
+---
+
+## 18.2. Peak is the figure sampling damages most
+
+**Measured against Twitch's own dashboard**, on a four-hour broadcast sampled
+once a minute:
+
+| | Twitch | here |
+|---|---|---|
+| Average viewers | 2 | 2.29 |
+| Peak viewers | 6 | 5 |
+| Duration | 4h03m | 4h01m |
+
+**The average is essentially exact and the peak is not**, and the reason is that
+they are different kinds of number. An average spreads its error across every
+sample, so more samples make it better. A peak depends on a single instant: if
+that instant falls between two samples it is gone, and no nearby sample makes up
+for it. Sampling can only ever push a peak downwards, never up.
+
+**This gets worse as an audience grows.** A raid or a clip going around produces
+a brief spike, and brief spikes are exactly what one-minute sampling misses. On a
+channel with a handful of viewers the gap is one person. On a larger one it could
+be hundreds.
+
+**Not fixed, deliberately.** Sampling every fifteen seconds would catch most
+spikes and cost about half a percent of the rate limit. But two stored figures
+assume one sample equals one minute — hours watched is `average × sample count`,
+and coverage compares samples against the broadcast's length in minutes. Both
+would silently produce numbers four times too large.
+
+Doing it properly means storing the sampling interval and changing both
+calculations. That is worth doing when the gap starts to matter; it is not worth
+doing to correct a difference of one viewer, on top of untested changes, the
+evening before a test.
+
+**What was done instead:** the label now reads *Peak observed* rather than
+*Peak*. It corrects nothing, and it stops presenting an estimate as a
+measurement.
+
+**Also learned from the same comparison:** the assumption behind § 18 — that
+Twitch keeps reporting a stream as live after it ends, leaving a ghost tail — did
+not hold here. The stream vanished from the listing about two minutes *before*
+Twitch's own dashboard says it ended, so the recorded duration came out short
+rather than long. The archive correction still applies; it extends the end rather
+than trimming it. The ghost tail remains a possibility, not an observation.
+
+---
+
+## 19. What has actually been tested
+
+**Decision:** state the range the collector has been validated over, rather than
+leaving it open and implying any duration works.
+
+**Validated:** broadcasts up to **four hours**, which is the length actually
+streamed. Testing twelve hours for sport would exercise a case that does not
+exist, while leaving the real one unverified.
+
+**Why four hours is a real boundary and not an arbitrary one:** a Twitch access
+token lives roughly four hours. A session of that length exercises the refresh
+path once. A longer one would exercise it twice, and nothing has ever run that
+far. The limit of what has been tested happens to sit exactly where a code path
+changes behaviour, so it is worth naming.
+
+**Measured during that run:** around 100 MB of memory and effectively no CPU
+between polls, with OBS encoding and transmitting on the same machine. That is
+the first verification of the constraint in § 1 — the one requirement that
+predates every other decision — under the conditions it was written for.
+
+**What this does not claim:** that longer broadcasts fail. Only that nobody has
+watched one, and this project does not report things nobody watched.
 
 ---
 

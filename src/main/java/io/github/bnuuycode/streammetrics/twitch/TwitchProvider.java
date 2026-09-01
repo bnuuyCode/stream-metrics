@@ -1,6 +1,7 @@
 package io.github.bnuuycode.streammetrics.twitch;
 
 import io.github.bnuuycode.streammetrics.db.AccountRepository.StoredAccount;
+import io.github.bnuuycode.streammetrics.metrics.ArchiveVerifiable;
 import io.github.bnuuycode.streammetrics.metrics.CollectionException;
 import io.github.bnuuycode.streammetrics.metrics.CollectionException.ErrorKind;
 import io.github.bnuuycode.streammetrics.metrics.LiveTrackable;
@@ -10,6 +11,7 @@ import io.github.bnuuycode.streammetrics.metrics.MetricsProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -24,7 +26,7 @@ import java.util.Optional;
  * <p>Implements both interfaces because Twitch genuinely does both. A platform
  * without broadcasts implements only the first.
  */
-public final class TwitchProvider implements MetricsProvider, LiveTrackable {
+public final class TwitchProvider implements MetricsProvider, LiveTrackable, ArchiveVerifiable {
 
     private static final Logger log = LoggerFactory.getLogger(TwitchProvider.class);
 
@@ -74,6 +76,14 @@ public final class TwitchProvider implements MetricsProvider, LiveTrackable {
         StoredAccount account = requireAccount();
         String token = token(account);
         return call(() -> session.client().currentStream(account.externalId(), token));
+    }
+
+    @Override
+    public Optional<Duration> archivedDuration(String externalStreamId) {
+        StoredAccount account = requireAccount();
+        String token = token(account);
+        return call(() -> session.client()
+                .archivedDuration(account.externalId(), externalStreamId, token));
     }
 
     private StoredAccount requireAccount() {

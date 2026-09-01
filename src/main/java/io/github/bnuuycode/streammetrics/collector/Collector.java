@@ -21,11 +21,13 @@ public final class Collector {
 
     private final SnapshotJob snapshotJob;
     private final LiveSampler liveSampler;
+    private final SettleJob settleJob;
     private final ScheduledExecutorService executor;
 
-    public Collector(SnapshotJob snapshotJob, LiveSampler liveSampler) {
+    public Collector(SnapshotJob snapshotJob, LiveSampler liveSampler, SettleJob settleJob) {
         this.snapshotJob = snapshotJob;
         this.liveSampler = liveSampler;
+        this.settleJob = settleJob;
 
         this.executor = Executors.newScheduledThreadPool(2, runnable -> {
             Thread thread = new Thread(runnable, "collector");
@@ -43,6 +45,10 @@ public final class Collector {
         // Immediately, then hourly. The first run is what catches up after the
         // machine has been off — no separate catch-up path to get wrong.
         executor.scheduleAtFixedRate(safely(snapshotJob), 0, 1, TimeUnit.HOURS);
+
+        // Every five minutes, looking for broadcasts old enough to settle. Cheap
+        // when there is nothing to do — one query that usually returns nothing.
+        executor.scheduleAtFixedRate(safely(settleJob), 1, 5, TimeUnit.MINUTES);
 
         scheduleNextSample(0);
 

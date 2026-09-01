@@ -5,7 +5,9 @@ import io.github.bnuuycode.streammetrics.db.StreamRepository;
 import io.github.bnuuycode.streammetrics.db.StreamRepository.FinishedSession;
 import io.github.bnuuycode.streammetrics.db.StreamRepository.LiveStats;
 import io.github.bnuuycode.streammetrics.db.StreamRepository.OpenSession;
+import io.github.bnuuycode.streammetrics.db.StreamRepository.SessionGroup;
 import io.github.bnuuycode.streammetrics.metrics.LiveTrackable.LiveSnapshot;
+import io.github.bnuuycode.streammetrics.metrics.MonthlySummary;
 import io.github.bnuuycode.streammetrics.web.ApiResponse;
 import io.github.bnuuycode.streammetrics.web.FreshnessCache;
 
@@ -66,16 +68,64 @@ public final class TwitchLiveService {
      * really go stale. Consistency matters more than the exception: there is no
      * endpoint in this application that answers without saying when.
      */
-    public ApiResponse<List<Previous>> recent(int limit) {
+    public ApiResponse<List<HistoryEntry>> recent(int limit) {
         Instant now = Instant.now();
 
         return session.account()
                 .map(account -> ApiResponse.ok(
-                        streams.findRecentSessions(account.id(), limit).stream()
-                                .map(this::toPrevious)
+                        streams.findRecentGroups(account.id(), limit).stream()
+                                .map(TwitchLiveService::toHistoryEntry)
                                 .toList(),
                         now))
                 .orElseGet(() -> ApiResponse.error("No Twitch account connected", now));
+    }
+
+    private static HistoryEntry toHistoryEntry(SessionGroup group) {
+        return new HistoryEntry(
+                group.id(),
+                group.title(),
+                group.category(),
+                iso(group.startedAt()),
+                iso(group.endedAt()),
+                group.onAirSeconds(),
+                group.peakViewers(),
+                group.avgViewers(),
+                group.parts(),
+                group.status(),
+                group.endSource(),
+                MonthlySummary.Coverage.of(group.sampleCount(), group.expectedSamples()));
+    }
+
+    /**
+     * One line of the history.
+     *
+     * <p>Carries its own coverage, which is the point: a total is only as
+     * trustworthy as the sampling behind it, and that varies from one broadcast
+     * to the next. Showing the figure without it invites reading an estimate as
+     * a measurement.
+     *
+     * @param onAirSeconds time actually broadcasting, excluding any break
+     *                     between merged parts
+     * @param parts        more than one means these broadcasts were merged by
+     *                     hand
+     * @param status       SETTLING while the figures may still move, FINAL once
+     *                     they will not
+     * @param endSource    VOD when the platform's own archive supplied the end
+     *                     time, SAMPLES when it came from our last reading
+     */
+    public record HistoryEntry(
+            long id,
+            String title,
+            String category,
+            String startedAt,
+            String endedAt,
+            long onAirSeconds,
+            Long peakViewers,
+            Double avgViewers,
+            int parts,
+            String status,
+            String endSource,
+            MonthlySummary.Coverage coverage) {
     }
 
     private LiveInfo describe(StoredAccount account, Optional<LiveSnapshot> stream) {
@@ -84,8 +134,9 @@ public final class TwitchLiveService {
 
             // Peak comes from our own samples, not from Twitch — Twitch does not
             // report it. It only exists because the sampler has been writing it
-            // down. Zero samples so far is normal: the sampler polls every five
-            // minutes while off air, so it can take a few minutes to notice.
+            // down. Zero samples so far is normal for the first minute or so: the
+            // sampler polls once a minute, so a broadcast that just started has
+            // not been measured yet.
             LiveStats stats = streams.findOpenSession(account.id())
                     .map(OpenSession::id)
                     .map(streams::currentStats)

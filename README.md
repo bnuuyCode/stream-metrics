@@ -7,9 +7,10 @@ Runs entirely on your own machine. No account, no subscription, no data leaving
 the building.
 
 > **Status: 0.1, early.** Twitch works end to end — login, live view, current
-> totals, daily history, per-stream statistics and monthly aggregates. Charts,
-> automatic backups and every other platform do not exist yet. Built in the open;
-> expect the shape of things to keep moving.
+> totals, daily history, per-stream statistics, monthly aggregates, and merging
+> broadcasts that a dropped connection split apart. Charts, automatic backups and
+> every other platform do not exist yet. Built in the open; expect the shape of
+> things to keep moving.
 
 ---
 
@@ -85,6 +86,25 @@ right.
   from samples taken every minute while live
 - **Monthly totals** — a closed calendar month added up, with follower growth
   taken from two exact readings and audience figures carrying their coverage
+- **Merging split broadcasts** — Twitch issues a new stream id every time a
+  connection drops, so one evening arrives as several. The collector notices,
+  asks once the broadcasting is over, and merges only what you tick. Duration
+  becomes the time actually on air, never the span including the outage
+
+## Conditions the numbers were collected under
+
+Two things quietly change what stored data means, and neither shows up as an
+error on any card, so both are reported on the dashboard.
+
+**Clock drift.** Almost every timestamp here comes from the local clock while the
+platform's come from theirs; near midnight a few minutes of drift files a metric
+under the wrong day. Every HTTP response carries the server's own time, so the
+offset is measured rather than assumed. It was found at 31 seconds on the machine
+this was built on.
+
+**Rate limiting.** When Twitch refuses work, further requests are held locally
+until it says it will accept them again — the fastest way to stay blocked is to
+keep asking.
 
 Twitch is implemented. The collector is platform-agnostic: adding another means
 writing one class and one line of registration.

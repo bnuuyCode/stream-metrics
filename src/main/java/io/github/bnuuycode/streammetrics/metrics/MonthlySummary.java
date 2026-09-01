@@ -71,10 +71,15 @@ public final class MonthlySummary {
         // must not weigh the same as a four-hour one.
         Double average = samplesTaken == 0 ? null : viewerMinutes / samplesTaken;
 
+        // Counts groups, not rows. Two broadcasts someone merged are one
+        // evening, and reporting them as two streams would inflate the count
+        // exactly where the merge was meant to correct it.
+        int streamCount = (int) sessions.stream().map(SessionTotals::groupId).distinct().count();
+
         return new Summary(
                 month.toString(),
                 month.getMonth().getDisplayName(TextStyle.FULL, Locale.ENGLISH) + " " + month.getYear(),
-                sessions.size(),
+                streamCount,
                 onAirMinutes,
                 Math.round(viewerMinutes),
                 peak,
@@ -146,7 +151,16 @@ public final class MonthlySummary {
                 return new Coverage(samplesTaken, samplesExpected, null, "NONE");
             }
 
-            int percent = (int) Math.round(100.0 * samplesTaken / samplesExpected);
+            // Capped, because more samples than expected is still just complete.
+            // Two things push the count over: the expected figure is whole
+            // minutes, so a broadcast of eight minutes eleven seconds expects
+            // eight; and restarting the application takes a sample immediately,
+            // which can land seconds after the previous one. Neither is a
+            // problem, but "125% coverage" on screen reads as broken arithmetic
+            // rather than as complete data.
+            //
+            // The raw counts are kept alongside, so nothing is hidden by the cap.
+            int percent = Math.min(100, (int) Math.round(100.0 * samplesTaken / samplesExpected));
             String level = percent >= 95 ? "FULL" : percent >= 70 ? "PARTIAL" : "LOW";
 
             return new Coverage(samplesTaken, samplesExpected, percent, level);

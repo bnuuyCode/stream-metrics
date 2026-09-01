@@ -1,6 +1,7 @@
 package io.github.bnuuycode.streammetrics.collector;
 
 import io.github.bnuuycode.streammetrics.db.CollectionLog;
+import io.github.bnuuycode.streammetrics.db.MergeSuggestionRepository;
 import io.github.bnuuycode.streammetrics.db.StreamRepository;
 import io.github.bnuuycode.streammetrics.db.StreamRepository.ExistingSession;
 import io.github.bnuuycode.streammetrics.db.StreamRepository.OpenSession;
@@ -23,93 +24,133 @@ import java.util.Optional;
  * peak viewers, stream duration and history do not exist in any API — they only
  * exist if something writes them down minute by minute. That something is this.
  *
- * <p><strong>Adaptive cadence.</strong> Every minute while live, every five
- * minutes while off air. High resolution where the chart needs it, quiet the
- * rest of the day.
+ * <p><strong>One poll a minute, always.</strong> Slowing down while off air used
+ * to look thrifty and cost up to five minutes of every broadcast, because a
+ * stream that starts between two polls is unsampled until the next one — and
+ * nobody can measure the past. See {@link #POLL_EVERY}.
  *
- * <p><strong>Grace period.</strong> Twitch issues a <em>new stream id</em> every
- * time a broadcast drops and comes back — it treats the two halves of an evening
- * as unrelated streams. Following that lead would shatter one session into
- * several rows and make every average and duration computed from them wrong.
+ * <p><strong>One session is one Twitch stream id.</strong> Twitch issues a new
+ * id every time a broadcast drops and returns, so an evening interrupted by a
+ * dead connection arrives here as several ids. This class no longer decides
+ * whether those belong together: a dropped connection and a deliberate restart
+ * are identical through the API, and only the person knows which happened. When
+ * two broadcasts sit close together it records a suggestion and moves on
+ * (DECISIONS.md § 17).
  *
- * <p>So the grace period governs both ways a broadcast can disappear:
- *
- * <ul>
- *   <li>a poll finding nothing does not end the session
- *   <li>a poll finding an <em>unfamiliar stream id</em> while a session is open
- *       is treated as a reconnection, not a new broadcast
- * </ul>
- *
- * <p>Either way the decision comes from the same question: how long since the
- * last sample? Inside {@link #GRACE}, same session. Beyond it, a new one.
- *
- * <p>The session's {@code ended_at} is always the last sample actually taken,
- * never the moment the absence was noticed — the broadcast stopped when the
- * numbers stopped. The samples keep a hole where the outage was, which is the
- * honest record: absence of a sample is absence of a sample, exactly as it is
- * for daily snapshots.
+ * <p><strong>The grace period still exists</strong>, for a narrower job: a poll
+ * that finds nothing does not end a session immediately, because Twitch can drop
+ * a stream from its listing briefly and put it back. Only continuous silence
+ * ends a broadcast, and its {@code ended_at} is the last sample actually taken —
+ * the numbers stopped when they stopped, not when this loop noticed.
  */
 public final class LiveSampler implements Runnable {
 
     private static final Logger log = LoggerFactory.getLogger(LiveSampler.class);
 
-    static final Duration WHILE_LIVE = Duration.ofMinutes(1);
-    static final Duration WHILE_OFFLINE = Duration.ofMinutes(5);
+    /**
+     * One poll a minute, on air or not.
+     *
+     * <p>This used to slow to five minutes while off air, to be polite about
+     * the API. That politeness cost up to five minutes of every broadcast: the
+     * gap between starting a stream and the collector noticing is time nobody
+     * can ever go back and measure, because no platform keeps per-minute viewer
+     * counts for anyone to query later. That is the whole reason this
+     * application exists.
+     *
+     * <p>And the saving was imaginary. Twitch's limit is per minute, not per
+     * day, so one call a minute spends about a tenth of one percent of it. A
+     * real cost in data quality was traded for a rounding error.
+     *
+     * <p>The gap is now at most one minute, and it is still counted: coverage
+     * measures samples taken against the broadcast's real length, so whatever is
+     * missed at the start shows up rather than being quietly rounded away.
+     */
+    static final Duration POLL_EVERY = Duration.ofMinutes(1);
 
-    /** How long a broadcast may vanish before it counts as over. */
-    private static final Duration GRACE = Duration.ofMinutes(10);
+    /**
+     * How long a broadcast may vanish from the listing before it counts as over.
+     *
+     * <p>Two minutes, from Twitch's own behaviour: it tolerates ninety seconds
+     * of lost connection before treating the return as a new broadcast. Waiting
+     * much past that is waiting for something that will not happen.
+     *
+     * <p>It used to be ten, from a time when this number decided whether an
+     * evening stayed in one piece. It no longer does. Merging is a person's
+     * decision now, and a broadcast that returns under the same id is reopened
+     * whether or not its session had already closed — so closing early costs
+     * nothing but a row that briefly reads as finished.
+     *
+     * <p>What it did cost was ten minutes of staring at a dashboard after
+     * every broadcast, waiting for it to appear.
+     */
+    private static final Duration GRACE = Duration.ofMinutes(2);
+
+    /**
+     * How close two broadcasts must be for the collector to ask whether they are
+     * one.
+     *
+     * <p>Ten minutes, and deliberately <em>not</em> tied to {@link #GRACE} any
+     * more. The two used to share a number and answer different questions, which
+     * meant shortening one would silently narrow the other: broadcasts five
+     * minutes apart would stop being offered at all, and nobody would notice
+     * until a night went unmerged.
+     *
+     * <p>They measure different things. Grace asks how long Twitch might still
+     * resume the same broadcast — a fact about Twitch, ninety seconds. This asks
+     * how far apart two broadcasts can be and still plausibly be one evening — a
+     * judgement about broadcasting, which the streamer set at ten minutes.
+     */
+    private static final Duration SUGGEST_WITHIN = Duration.ofMinutes(10);
 
     private final List<Tracked> tracked;
     private final StreamRepository streams;
+    private final MergeSuggestionRepository suggestions;
     private final CollectionLog runs;
 
-    private volatile boolean anyLive = false;
-
-    public LiveSampler(List<Tracked> tracked, StreamRepository streams, CollectionLog runs) {
+    public LiveSampler(List<Tracked> tracked,
+                       StreamRepository streams,
+                       MergeSuggestionRepository suggestions,
+                       CollectionLog runs) {
         this.tracked = tracked;
         this.streams = streams;
+        this.suggestions = suggestions;
         this.runs = runs;
     }
 
     /** How long to wait before the next poll. */
     public Duration nextDelay() {
-        return anyLive ? WHILE_LIVE : WHILE_OFFLINE;
+        return POLL_EVERY;
     }
 
     @Override
     public void run() {
-        boolean live = false;
-
         for (Tracked entry : tracked) {
             try {
-                live |= poll(entry);
+                poll(entry);
             } catch (RuntimeException e) {
                 // Never let one platform's failure stop the loop or kill the
                 // scheduled task.
                 log.error("Live sampling failed for {}", entry.provider().platform(), e);
             }
         }
-
-        anyLive = live;
     }
 
     /**
      * One poll of one platform, recorded in {@link CollectionLog} whatever the
      * outcome.
      *
-     * <p>Yes, that is a row per minute while live and one every five minutes
-     * otherwise — a few hundred a day, a handful of kilobytes, pruned at ninety
-     * days. Worth every byte: without it, an empty stretch of samples is
-     * indistinguishable from a collector that never woke up, and "the data is
-     * missing and I cannot tell you why" is the one answer this project is not
-     * allowed to give.
+     * <p>Yes, that is a row every minute of every day — around fourteen hundred,
+     * a few megabytes before the ninety-day prune. Worth every byte: without it,
+     * an empty stretch of samples is indistinguishable from a collector that
+     * never woke up, and "the data is missing and I cannot tell you why" is the
+     * one answer this project is not allowed to give.
      */
-    private boolean poll(Tracked entry) {
+    private void poll(Tracked entry) {
         Optional<Long> accountId = entry.provider().accountId();
         if (accountId.isEmpty()) {
             // Nobody connected this platform, so there is no account to
             // attribute an attempt to.
-            return false;
+            return;
         }
 
         long runId = runs.start(accountId.get(), CollectionLog.LIVE_SAMPLE);
@@ -123,16 +164,17 @@ public final class LiveSampler implements Runnable {
             // of returning empty when the network fails.
             runs.failed(runId, e.kind(), e.getMessage());
             log.warn("Could not check live status for {} [{}]", entry.provider().platform(), e.kind());
-            return anyLive;
+            return;
         }
 
         try {
-            boolean live = stream.isPresent()
-                    ? recordLive(accountId.get(), stream.get())
-                    : closeIfSilentTooLong(accountId.get());
+            if (stream.isPresent()) {
+                recordLive(accountId.get(), stream.get());
+            } else {
+                closeIfSilentTooLong(accountId.get());
+            }
 
             runs.succeeded(runId);
-            return live;
 
         } catch (RuntimeException e) {
             runs.failed(runId, CollectionException.ErrorKind.UNKNOWN, String.valueOf(e));
@@ -140,90 +182,125 @@ public final class LiveSampler implements Runnable {
         }
     }
 
-    private boolean recordLive(long accountId, LiveSnapshot snapshot) {
+    private void recordLive(long accountId, LiveSnapshot snapshot) {
         Optional<OpenSession> open = streams.findOpenSession(accountId);
-        long sessionId;
 
-        if (open.isEmpty()) {
-            Optional<ExistingSession> existing =
-                    streams.findSessionByStreamId(accountId, snapshot.streamId());
+        // Same broadcast as the last poll. The ordinary case, and the only one
+        // that needs no decision at all.
+        if (open.isPresent() && open.get().streamId().equals(snapshot.streamId())) {
+            record(open.get().id(), snapshot);
+            return;
+        }
 
-            if (existing.isPresent() && existing.get().isClosed()) {
-                // This broadcast was marked as finished while it was in fact
-                // still running — long enough offline to look abandoned. Putting
-                // it back on air is right; opening a second session for the same
-                // stream id would split one broadcast in two and throw away the
-                // samples already collected.
-                streams.reopenSession(existing.get().id());
-                sessionId = existing.get().id();
-                log.info("Session {} was closed early but is still live — reopened",
-                        snapshot.streamId());
+        // A different id is on air, so whatever was open has ended — we simply
+        // never saw it leave the listing.
+        Long previousId = null;
+        Instant previousEnd = null;
 
-            } else {
-                log.info("Live detected: \"{}\" ({})", snapshot.title(), snapshot.category());
-                sessionId = streams.openSession(
-                        accountId, snapshot.streamId(), snapshot.startedAt(),
-                        snapshot.title(), snapshot.category());
-            }
+        if (open.isPresent()) {
+            OpenSession previous = open.get();
+            previousId = previous.id();
+            previousEnd = streams.lastSampleAt(previousId).orElse(previous.startedAt());
+            streams.closeSession(previousId, previousEnd);
+            log.info("Session {} closed; a different broadcast is on air", previous.streamId());
+        }
 
-        } else if (streams.hasSegment(open.get().id(), snapshot.streamId())) {
-            // Same segment as last poll. The ordinary case.
-            sessionId = open.get().id();
+        long sessionId = openOrReopen(accountId, snapshot);
 
-        } else {
-            // A stream id we have not seen, while a session is still open.
-            //
-            // Twitch issues a new id every time a broadcast drops and returns,
-            // so this is ambiguous: either the connection blinked, or a genuinely
-            // new broadcast started. The last sample decides.
-            sessionId = open.get().id();
-            Instant lastSeen = streams.lastSampleAt(sessionId).orElse(open.get().startedAt());
-
-            if (Duration.between(lastSeen, Instant.now()).compareTo(GRACE) < 0) {
-                // Back inside the grace window: same evening, new segment. The
-                // previous segment is closed at its last sample, so the outage
-                // is recorded rather than smoothed away.
-                streams.closeOpenSegments(sessionId, lastSeen);
-                streams.addSegment(sessionId, snapshot.streamId(), snapshot.startedAt());
-                log.info("Stream reconnected as {} — continuing the same session", snapshot.streamId());
-
-            } else {
-                // Gone long enough to count as a different broadcast.
-                streams.closeSession(sessionId, lastSeen);
-                log.info("Session {} closed; new broadcast {} starting",
-                        open.get().streamId(), snapshot.streamId());
-
-                sessionId = streams.openSession(
-                        accountId, snapshot.streamId(), snapshot.startedAt(),
-                        snapshot.title(), snapshot.category());
+        // Nothing was open, so look at whatever finished last instead. A
+        // broadcast that ended fifteen minutes ago and one starting now may
+        // still be the same evening.
+        if (previousId == null) {
+            Optional<ExistingSession> last = streams.findMostRecentFinished(accountId);
+            if (last.isPresent() && last.get().id() != sessionId) {
+                previousId = last.get().id();
+                previousEnd = last.get().endedAt();
             }
         }
 
-        streams.addSample(sessionId, Instant.now(), snapshot.viewers());
-        streams.updateSessionInfo(sessionId, snapshot.title(), snapshot.category());
-        return true;
+        maybeSuggestMerge(accountId, sessionId, previousId, previousEnd, snapshot.startedAt());
+
+        record(sessionId, snapshot);
     }
 
-    private boolean closeIfSilentTooLong(long accountId) {
+    /**
+     * Opens a session for this stream id, or puts an existing one back on air.
+     *
+     * <p>A session can be closed while its broadcast is in fact still running —
+     * the application being shut down for a while is enough. When the same id
+     * turns up again it must be recognised as the session it is, not duplicated
+     * into a second one that discards the samples already collected.
+     */
+    private long openOrReopen(long accountId, LiveSnapshot snapshot) {
+        Optional<ExistingSession> existing =
+                streams.findSessionByStreamId(accountId, snapshot.streamId());
+
+        if (existing.isPresent()) {
+            if (existing.get().isClosed()) {
+                streams.reopenSession(existing.get().id());
+                log.info("Session {} was closed but is live again — reopened", snapshot.streamId());
+            }
+            return existing.get().id();
+        }
+
+        log.info("Live detected: \"{}\" ({})", snapshot.title(), snapshot.category());
+        return streams.openSession(
+                accountId, snapshot.streamId(), snapshot.startedAt(),
+                snapshot.title(), snapshot.category());
+    }
+
+    /**
+     * Records that two broadcasts might be one, and stops there.
+     *
+     * <p>Deliberately does not merge. The gap between them is the only evidence
+     * available, and a gap does not distinguish a dropped connection from
+     * someone ending a stream to start another. The suggestion carries the gap
+     * so the person can judge it with the context the collector does not have.
+     */
+    private void maybeSuggestMerge(long accountId, long sessionId,
+                                   Long previousId, Instant previousEnd, Instant startedAt) {
+        if (previousId == null || previousEnd == null || previousId == sessionId) {
+            return;
+        }
+
+        long gap = Duration.between(previousEnd, startedAt).getSeconds();
+
+        // A negative gap means the new broadcast reportedly began before the
+        // previous one ended — overlapping ids, which should not happen and is
+        // not something to guess about.
+        if (gap < 0 || gap > SUGGEST_WITHIN.toSeconds()) {
+            return;
+        }
+
+        suggestions.suggest(accountId, sessionId, previousId, gap);
+        log.info("Two broadcasts {}s apart — merge suggested, not applied", gap);
+    }
+
+    private void record(long sessionId, LiveSnapshot snapshot) {
+        streams.addSample(sessionId, Instant.now(), snapshot.viewers());
+        streams.updateSessionInfo(sessionId, snapshot.title(), snapshot.category());
+    }
+
+    private void closeIfSilentTooLong(long accountId) {
         Optional<OpenSession> open = streams.findOpenSession(accountId);
         if (open.isEmpty()) {
-            return false;
+            return;
         }
 
         Instant lastSeen = streams.lastSampleAt(open.get().id()).orElse(open.get().startedAt());
 
         if (Duration.between(lastSeen, Instant.now()).compareTo(GRACE) < 0) {
-            // Still inside the grace period. Report as live so the poller keeps
-            // its fast cadence and catches the return quickly.
+            // Still inside the grace period. Twitch drops a stream from its
+            // listing briefly and puts it back, and ending a broadcast on the
+            // strength of one such blink would be wrong permanently.
             log.debug("Stream missing but within grace period");
-            return true;
+            return;
         }
 
         // ended_at is the last sample, not now: the broadcast stopped when the
         // numbers stopped, not when this loop happened to notice.
         streams.closeSession(open.get().id(), lastSeen);
         log.info("Session {} closed", open.get().streamId());
-        return false;
     }
 
     /**

@@ -257,6 +257,73 @@
             color: var(--muted);
         }
 
+        /* --- pending merge decisions ---
+           A section, never a dialog. Someone mid-broadcast cannot decide
+           whether two sessions are one, and a prompt that appears and
+           disappears forces the answer at the worst possible moment. This waits
+           as long as it has to. */
+
+        .ask {
+            border: 1px solid var(--accent);
+            border-radius: 10px;
+            padding: 1rem 1.15rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .ask:last-child { margin-bottom: 0; }
+
+        .ask-q {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--heading);
+            margin: 0 0 0.15rem;
+        }
+
+        .ask-gap { font-size: 0.8rem; color: var(--muted); margin: 0 0 0.9rem; }
+
+        .ask-parts { margin-bottom: 1rem; }
+
+        .ask-part {
+            display: flex;
+            align-items: baseline;
+            gap: 0.65rem;
+            padding: 0.35rem 0;
+            font-size: 0.85rem;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .ask-part input { margin: 0; accent-color: var(--accent); cursor: pointer; }
+        .ask-when { color: var(--muted); white-space: nowrap; }
+        .ask-what { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+        .ask-len { color: var(--muted); white-space: nowrap; }
+
+        /* The silence between two broadcasts, shown for what it is. It is the
+           only evidence available, and it does not distinguish a dropped
+           connection from a deliberate restart. */
+        .ask-gap-row {
+            font-size: 0.75rem;
+            color: var(--muted);
+            padding: 0.1rem 0 0.1rem 1.55rem;
+        }
+
+        /* Says what will change and that it can be undone. Saying "this cannot
+           be undone" would be simpler and would be a lie: a merge is a link,
+           not a rewrite. The real reason to pause is that wrong totals are
+           quiet ones. */
+        .ask-notice {
+            font-size: 0.78rem;
+            line-height: 1.45;
+            color: var(--muted);
+            background: var(--sunken);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 0.6rem 0.75rem;
+            margin-bottom: 0.9rem;
+        }
+
+        .ask-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+        .ask-actions button:disabled { opacity: 0.4; cursor: not-allowed; }
+
         /* --- recent streams table --- */
 
         /* Wide content scrolls inside its own box rather than pushing the page
@@ -265,9 +332,9 @@
 
         .sessions {
             display: grid;
-            grid-template-columns: auto minmax(8rem, 1fr) auto auto auto;
-            gap: 0 1.25rem;
-            min-width: 26rem;
+            grid-template-columns: auto minmax(7rem, 1fr) auto auto auto auto;
+            gap: 0 1.15rem;
+            min-width: 30rem;
         }
 
         .sessions > span {
@@ -296,6 +363,23 @@
             overflow: hidden;
             text-overflow: ellipsis;
             color: var(--heading);
+        }
+
+        /* Per-broadcast coverage. Sampling quality varies from one stream to
+           the next, so a figure that is trustworthy on one line may not be on
+           the one below it. */
+        .sessions .cov { text-align: right; font-variant-numeric: tabular-nums; font-size: 0.8rem; }
+        .sessions .cov.full    { color: var(--ok); }
+        .sessions .cov.partial { color: var(--stale); }
+        .sessions .cov.low     { color: var(--error); }
+        .sessions .cov.none    { color: var(--muted); }
+
+        /* Marks a line that is several broadcasts someone decided were one. */
+        .merged-mark {
+            font-size: 0.7rem;
+            color: var(--accent);
+            margin-left: 0.4rem;
+            white-space: nowrap;
         }
 
         dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 0.5rem 1.5rem; }
@@ -370,6 +454,14 @@
         </div>
     </section>
 
+    <section class="card" id="merge-card" hidden>
+        <div class="card-head">
+            <span class="card-title">Were these one broadcast?</span>
+            <span id="merge-count" class="badge stale">—</span>
+        </div>
+        <div id="merge-body"></div>
+    </section>
+
     <section class="card">
         <div class="card-head">
             <span class="card-title">Recent streams</span>
@@ -390,7 +482,12 @@
             <dd id="db-path">—</dd>
             <dt>Tables</dt>
             <dd id="db-tables">—</dd>
+            <dt>Clock</dt>
+            <dd id="clock-skew">—</dd>
+            <dt>Rate limit</dt>
+            <dd id="rate-limit">—</dd>
         </dl>
+        <p id="conditions" class="month-note" hidden></p>
     </section>
 
     <footer>
@@ -508,7 +605,7 @@
             stats.className = 'stats';
             stats.append(
                 statTile('Viewers', wrap(now.viewers)),
-                statTile('Peak', wrap(now.peakViewers)),
+                statTile('Peak observed', wrap(now.peakViewers)),
                 statTile('Uptime', wrap(now.startedAt), elapsed)
             );
 
@@ -522,8 +619,8 @@
                 note.className = 'hint';
                 note.style.marginTop = '0.75rem';
                 // Honest about its own limits: peak needs samples to exist, and
-                // the sampler polls every five minutes while off air.
-                note.textContent = 'No viewer samples yet — the collector checks every five minutes while off air, so the first one may take a moment.';
+                // the sampler polls once a minute.
+                note.textContent = 'No viewer samples yet. The collector checks once a minute, so the first one lands shortly.';
                 body.append(note);
             }
             return;
@@ -632,7 +729,7 @@
             ['Hours on air', hoursAndMinutes(summary.onAirMinutes), false],
             ['Hours watched', hoursAndMinutes(summary.viewerMinutes), true],
             ['Avg viewers', summary.averageViewers != null ? summary.averageViewers.toFixed(1) : '—', true],
-            ['Peak', summary.peakViewers != null ? Number(summary.peakViewers).toLocaleString() : '—', true]
+            ['Peak observed', summary.peakViewers != null ? Number(summary.peakViewers).toLocaleString() : '—', true]
         ];
 
         if (summary.followers) {
@@ -740,7 +837,7 @@
         const grid = document.createElement('div');
         grid.className = 'sessions';
 
-        ['Date', 'Stream', 'Duration', 'Peak', 'Avg'].forEach((label, i) => {
+        ['Date', 'Stream', 'Duration', 'Peak obs.', 'Avg', 'Coverage'].forEach((label, i) => {
             const cell = document.createElement('span');
             cell.className = 'head' + (i >= 2 ? ' num' : '');
             cell.textContent = label;
@@ -750,12 +847,38 @@
         sessions.forEach(s => {
             const started = new Date(s.startedAt);
 
+            const what = cell('what', s.title || 'Untitled');
+            // A line built from several broadcasts says so. Otherwise a merged
+            // evening is indistinguishable from one that never dropped.
+            if (s.parts > 1) {
+                const mark = document.createElement('span');
+                mark.className = 'merged-mark';
+                mark.textContent = '· ' + s.parts + ' merged';
+                what.append(mark);
+            }
+            // Figures that may still change are labelled rather than shown as
+            // though they were final. A broadcast settles once its archive has
+            // been checked, which takes about twenty minutes.
+            if (s.status === 'SETTLING') {
+                const mark = document.createElement('span');
+                mark.className = 'merged-mark';
+                mark.style.color = 'var(--stale)';
+                mark.textContent = '· settling';
+                what.append(mark);
+            }
+
+            const level = (s.coverage?.level || 'NONE').toLowerCase();
+            const pct = s.coverage?.percent;
+
             grid.append(
                 cell('when', started.toLocaleDateString(undefined, { day: '2-digit', month: 'short' })),
-                cell('what', s.title || 'Untitled'),
-                cell('num', s.startedAt && s.endedAt ? durationBetween(s.startedAt, s.endedAt) : '—'),
+                what,
+                // Duration is the time actually on air, which for a merged line
+                // excludes the gap between its parts.
+                cell('num', hoursAndMinutes(Math.round(s.onAirSeconds / 60))),
                 cell('num', s.peakViewers ?? '—'),
-                cell('num', s.avgViewers != null ? s.avgViewers.toFixed(1) : '—')
+                cell('num', s.avgViewers != null ? s.avgViewers.toFixed(1) : '—'),
+                cell('cov ' + level, pct === null || pct === undefined ? '—' : pct + '%')
             );
         });
 
@@ -777,16 +900,210 @@
         return div;
     }
 
+    function clockOf(iso) {
+        return iso ? new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '—';
+    }
+
+    /**
+     * The collector's unanswered questions.
+     *
+     * The card is hidden when there are none and shown when there are, and it
+     * never steals focus or closes itself. That is the whole design: a merge is
+     * a judgement only the person can make, and they are often busy doing the
+     * very thing being asked about.
+     */
+    function renderMerges(response) {
+        const card = document.getElementById('merge-card');
+        const body = document.getElementById('merge-body');
+        const list = response.value;
+
+        if (!Array.isArray(list) || list.length === 0) {
+            card.hidden = true;
+            body.replaceChildren();
+            return;
+        }
+
+        card.hidden = false;
+        const badge = document.getElementById('merge-count');
+        badge.className = 'badge stale';
+        badge.textContent = list.length + (list.length === 1 ? ' waiting' : ' waiting');
+
+        body.replaceChildren(...list.map(askBlock));
+    }
+
+    function askBlock(cluster) {
+        const box = document.createElement('div');
+        box.className = 'ask';
+
+        const q = document.createElement('p');
+        q.className = 'ask-q';
+        q.textContent = cluster.parts.length + ' broadcasts in a row';
+
+        const why = document.createElement('p');
+        why.className = 'ask-gap';
+        // States the evidence and stops there. The gap cannot tell a dropped
+        // connection from a deliberate restart; the person can.
+        why.textContent = 'The connection may have dropped and resumed, or you may have started new ones. '
+            + 'Tick the ones that were the same broadcast.';
+
+        const parts = document.createElement('div');
+        parts.className = 'ask-parts';
+        const boxes = [];
+
+        cluster.parts.forEach(part => {
+            if (part.gapBeforeSeconds != null) {
+                const gapRow = document.createElement('div');
+                gapRow.className = 'ask-gap-row';
+                gapRow.textContent = '↕ ' + Math.round(part.gapBeforeSeconds / 60) + ' min of silence';
+                parts.append(gapRow);
+            }
+
+            const row = document.createElement('label');
+            row.className = 'ask-part';
+
+            const tick = document.createElement('input');
+            tick.type = 'checkbox';
+            tick.checked = true;
+            tick.value = String(part.sessionId);
+            boxes.push(tick);
+
+            const when = document.createElement('span');
+            when.className = 'ask-when';
+            when.textContent = clockOf(part.startedAt) + ' → ' + clockOf(part.endedAt);
+
+            const what = document.createElement('span');
+            what.className = 'ask-what';
+            what.textContent = part.title || 'Untitled';
+
+            const len = document.createElement('span');
+            len.className = 'ask-len';
+            len.textContent = part.onAirSeconds != null
+                ? hoursAndMinutes(Math.round(part.onAirSeconds / 60))
+                : 'running';
+
+            row.append(tick, when, what, len);
+            parts.append(row);
+        });
+
+        const notice = document.createElement('p');
+        notice.className = 'ask-notice';
+
+        const actions = document.createElement('div');
+        actions.className = 'ask-actions';
+
+        const merge = document.createElement('button');
+        merge.type = 'button';
+        merge.className = 'button primary';
+
+        const separate = document.createElement('button');
+        separate.type = 'button';
+        separate.textContent = 'They are separate';
+
+        function refresh() {
+            const chosen = boxes.filter(b => b.checked).length;
+            merge.textContent = chosen < 2 ? 'Merge' : 'Merge ' + chosen;
+            merge.disabled = chosen < 2;
+            notice.textContent = chosen < 2
+                ? 'Tick at least two broadcasts to merge them.'
+                : 'Merging ' + chosen + ' broadcasts into one changes its duration, average '
+                  + 'and this month’s totals. It can be undone later from the history.';
+        }
+
+        boxes.forEach(b => b.addEventListener('change', refresh));
+        refresh();
+
+        merge.addEventListener('click', () => send(
+            '/api/twitch/merges/apply',
+            { sessionIds: boxes.filter(b => b.checked).map(b => Number(b.value)) },
+            merge));
+
+        separate.addEventListener('click', () => send(
+            '/api/twitch/merges/dismiss',
+            { suggestionIds: cluster.suggestionIds },
+            separate));
+
+        actions.append(merge, separate);
+        box.append(q, why, parts, notice, actions);
+        return box;
+    }
+
+    async function send(url, body, button) {
+        const original = button.textContent;
+        button.disabled = true;
+        try {
+            const res = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            await load();
+        } catch (err) {
+            // The decision did not land, so the question stays open. Hiding it
+            // would silently discard an answer the person already gave.
+            button.disabled = false;
+            button.textContent = original + ' — failed, try again';
+        }
+    }
+
     function renderHealth(response) {
         const status = paintBadge(document.getElementById('health-badge'), response.status);
         const card = document.getElementById('health-card');
 
+        const clock = document.getElementById('clock-skew');
+        const rate = document.getElementById('rate-limit');
+        const warning = document.getElementById('conditions');
+
         if (response.value) {
-            document.getElementById('db-path').textContent = response.value.path;
-            document.getElementById('db-tables').textContent = response.value.tableCount;
+            document.getElementById('db-path').textContent = response.value.database?.path ?? '—';
+            document.getElementById('db-tables').textContent = response.value.database?.tableCount ?? '—';
+
+            // Both of these change what the stored numbers mean, and neither
+            // shows up as an error on any card. Without a line saying so, they
+            // stay invisible until the damage is already in the history.
+            const skew = response.value.clock;
+            const limit = response.value.rateLimit;
+            const notes = [];
+
+            if (!skew) {
+                clock.textContent = 'not measured yet';
+            } else {
+                const off = skew.offsetSeconds;
+                const ahead = off >= 0 ? 'ahead' : 'behind';
+                clock.textContent = Math.abs(off) + 's ' + ahead + ' of Twitch';
+                clock.style.color = skew.level === 'OK' ? '' : 'var(--' + (skew.level === 'BROKEN' ? 'error' : 'stale') + ')';
+
+                if (skew.level === 'DRIFTING') {
+                    notes.push('This machine’s clock differs from Twitch by ' + Math.abs(off)
+                        + ' seconds. Timestamps written here come from the local clock.');
+                } else if (skew.level === 'BROKEN') {
+                    notes.push('This machine’s clock is off by ' + Math.abs(off)
+                        + ' seconds. Near midnight that is enough to file a day’s metrics under the wrong date. '
+                        + 'Worth fixing before it reaches the history.');
+                }
+            }
+
+            if (!limit) {
+                rate.textContent = 'nothing observed';
+            } else if (limit.blocked) {
+                rate.textContent = 'holding until ' + clockOf(limit.openAgainAt);
+                rate.style.color = 'var(--stale)';
+                notes.push('Twitch is rate limiting this application, so samples are being missed right now. '
+                    + 'It resumes on its own.');
+            } else {
+                rate.textContent = limit.remaining != null ? limit.remaining + ' left' : 'ok';
+                rate.style.color = '';
+            }
+
+            warning.hidden = notes.length === 0;
+            warning.textContent = notes.join(' ');
+
         } else {
             document.getElementById('db-path').textContent = response.message || 'unavailable';
             document.getElementById('db-tables').textContent = '—';
+            clock.textContent = '—';
+            rate.textContent = '—';
+            warning.hidden = true;
         }
 
         card.classList.toggle('dimmed', status !== 'ok');
@@ -811,7 +1128,7 @@
     }
 
     async function load() {
-        const [health, twitchStatus, twitchMetrics, live, sessions, month] = await Promise.all([
+        const [health, twitchStatus, twitchMetrics, live, sessions, month, merges] = await Promise.all([
             get('/api/health').catch(e => failed(e.message)),
             get('/api/twitch/status').catch(e => failed(e.message)),
             get('/api/twitch/metrics').catch(e => {
@@ -820,10 +1137,12 @@
             }),
             get('/api/twitch/live').catch(e => failed(e.message)),
             get('/api/twitch/sessions?limit=5').catch(e => failed(e.message)),
-            get('/api/twitch/month').catch(e => failed(e.message))
+            get('/api/twitch/month').catch(e => failed(e.message)),
+            get('/api/twitch/merges').catch(e => failed(e.message))
         ]);
 
         renderStream(live);
+        renderMerges(merges);
         renderTwitch(twitchStatus, twitchMetrics, month);
         renderSessions(sessions);
         renderHealth(health);

@@ -8,16 +8,24 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 
 /**
- * Live sessions, the segments they are made of, and the viewer samples taken
- * during them.
+ * Live sessions and the viewer samples taken during them.
  *
- * <p>A <em>session</em> is the broadcast as the streamer experienced it. A
- * <em>segment</em> is one Twitch stream id. They are not the same thing: Twitch
- * issues a new id every time a connection drops and returns, so one evening can
- * be several segments. See {@code V2__stream_segments.sql}.
+ * <p>A session is exactly one Twitch stream id — the smallest thing the platform
+ * actually tells us about. Twitch issues a new id every time a connection drops
+ * and returns, so an evening interrupted by a dead connection arrives here as
+ * several sessions.
+ *
+ * <p>Whether those belong together is not decided here. Grouping happens through
+ * {@code merged_into_id}, and only when a person says so: a dropped connection
+ * and a deliberate restart are identical through the API, and guessing between
+ * them from timing produces errors nobody ever notices (DECISIONS.md § 17).
+ *
+ * <p>Because grouping is a link rather than a rewrite, it is reversible and
+ * nothing is destroyed to create it.
  */
 public final class StreamRepository {
 
@@ -44,13 +52,16 @@ public final class StreamRepository {
                 .findFirst());
     }
 
-    /** Opens a session and records its first segment. */
+    /** Opens a session for one Twitch stream id. */
     public long openSession(long accountId, String streamId, Instant startedAt, String title, String category) {
-        long sessionId = jdbi.withHandle(h -> {
+        return jdbi.withHandle(h -> {
+            // status is set explicitly rather than left to the column default,
+            // which is FINAL — right for rows that already existed when the
+            // column was added, wrong for a broadcast that just started.
             h.createUpdate("""
                             INSERT INTO stream_session (
-                                account_id, external_stream_id, started_at, title, category)
-                            VALUES (:accountId, :streamId, :startedAt, :title, :category)
+                                account_id, external_stream_id, started_at, title, category, status)
+                            VALUES (:accountId, :streamId, :startedAt, :title, :category, 'LIVE')
                             ON CONFLICT (account_id, external_stream_id) DO UPDATE SET
                                 title = excluded.title,
                                 category = excluded.category
@@ -71,54 +82,6 @@ public final class StreamRepository {
                     .mapTo(Long.class)
                     .one();
         });
-
-        addSegment(sessionId, streamId, startedAt);
-        return sessionId;
-    }
-
-    /**
-     * Attaches another Twitch stream id to an existing session.
-     *
-     * <p>Called when a broadcast comes back after a drop: same evening, new id.
-     * The previous segment is closed at its last sample, so the gap is recorded
-     * rather than smoothed over.
-     */
-    public void addSegment(long sessionId, String streamId, Instant startedAt) {
-        jdbi.useHandle(h -> h
-                .createUpdate("""
-                        INSERT INTO stream_segment (session_id, external_stream_id, started_at)
-                        VALUES (:sessionId, :streamId, :startedAt)
-                        ON CONFLICT (session_id, external_stream_id) DO NOTHING
-                        """)
-                .bind("sessionId", sessionId)
-                .bind("streamId", streamId)
-                .bind("startedAt", text(startedAt))
-                .execute());
-    }
-
-    /** Whether this session already contains that Twitch stream id. */
-    public boolean hasSegment(long sessionId, String streamId) {
-        return jdbi.withHandle(h -> h
-                .createQuery("""
-                        SELECT COUNT(*) FROM stream_segment
-                        WHERE session_id = :sessionId AND external_stream_id = :streamId
-                        """)
-                .bind("sessionId", sessionId)
-                .bind("streamId", streamId)
-                .mapTo(Integer.class)
-                .one()) > 0;
-    }
-
-    /** Closes any segment of this session still marked as running. */
-    public void closeOpenSegments(long sessionId, Instant endedAt) {
-        jdbi.useHandle(h -> h
-                .createUpdate("""
-                        UPDATE stream_segment SET ended_at = :endedAt
-                        WHERE session_id = :sessionId AND ended_at IS NULL
-                        """)
-                .bind("sessionId", sessionId)
-                .bind("endedAt", text(endedAt))
-                .execute());
     }
 
     /** Keeps title and category current — streamers change them mid-broadcast. */
@@ -145,33 +108,90 @@ public final class StreamRepository {
     }
 
     /**
-     * Closes a session and its segments, filling in the summary from its own
-     * samples.
+     * Closes a session, filling in the summary from its own samples.
      *
      * <p>These are computed values being stored — the one deliberate exception
      * in the schema (DECISIONS.md § 6.1). It is allowed precisely because the
      * samples they come from get deleted at ninety days, which turns the summary
      * from a cache into the only surviving record.
      *
-     * <p>The average is taken across every sample of the session, which spans
-     * the segments. Averaging per segment and then averaging those would weigh a
-     * two-minute reconnect the same as a four-hour stretch.
+     * <p>Storing {@code sample_count} alongside the average is what lets merged
+     * groups be combined correctly long after the samples are gone: a weighted
+     * mean needs the weights, and an average of averages would let a two-minute
+     * reconnection count for as much as a four-hour stretch.
      */
     public void closeSession(long sessionId, Instant endedAt) {
-        closeOpenSegments(sessionId, endedAt);
+        summarise(sessionId, endedAt, "SETTLING", "SAMPLES");
+    }
 
+    /**
+     * Settles a broadcast for good, on the strength of whatever evidence turned
+     * out to be available.
+     *
+     * @param endedAt the corrected end when the archive supplied one, otherwise
+     *                the last sample already recorded
+     * @param source  {@code VOD} or {@code SAMPLES} — kept because a duration
+     *                nobody can trace to how it was obtained is a duration
+     *                nobody can check
+     */
+    public void finalise(long sessionId, Instant endedAt, String source) {
+        summarise(sessionId, endedAt, "FINAL", source);
+    }
+
+    /**
+     * Recomputes the stored summary over the samples that fall inside the
+     * broadcast.
+     *
+     * <p>The {@code sampled_at <= endedAt} bound is what discards the ghost tail.
+     * Twitch keeps listing a stream for some minutes after it ends, so those last
+     * readings describe a broadcast that was already over; counting them
+     * stretches the duration and drags the average down.
+     *
+     * <p>They are excluded rather than deleted. They are real observations of
+     * what Twitch reported, and throwing away evidence to make a number tidier is
+     * the opposite of what this project is for.
+     */
+    private void summarise(long sessionId, Instant endedAt, String status, String source) {
         jdbi.useHandle(h -> h
                 .createUpdate("""
                         UPDATE stream_session SET
                             ended_at = :endedAt,
-                            peak_viewers  = (SELECT MAX(viewers) FROM viewer_sample WHERE session_id = :id),
-                            avg_viewers   = (SELECT AVG(viewers) FROM viewer_sample WHERE session_id = :id),
-                            sample_count  = (SELECT COUNT(*)     FROM viewer_sample WHERE session_id = :id)
+                            status = :status,
+                            end_source = :source,
+                            peak_viewers = (SELECT MAX(viewers) FROM viewer_sample
+                                            WHERE session_id = :id AND sampled_at <= :endedAt),
+                            avg_viewers  = (SELECT AVG(viewers) FROM viewer_sample
+                                            WHERE session_id = :id AND sampled_at <= :endedAt),
+                            sample_count = (SELECT COUNT(*)     FROM viewer_sample
+                                            WHERE session_id = :id AND sampled_at <= :endedAt)
                         WHERE id = :id
                         """)
                 .bind("id", sessionId)
                 .bind("endedAt", text(endedAt))
+                .bind("status", status)
+                .bind("source", source)
                 .execute());
+    }
+
+    /** Broadcasts that have ended but whose figures may still move. */
+    public List<ExistingSession> findSettling(long accountId, Instant endedBefore) {
+        return jdbi.withHandle(h -> h
+                .createQuery("""
+                        SELECT id, external_stream_id, started_at, ended_at
+                        FROM stream_session
+                        WHERE account_id = :accountId
+                          AND status = 'SETTLING'
+                          AND ended_at < :cutoff
+                        ORDER BY ended_at
+                        """)
+                .bind("accountId", accountId)
+                .bind("cutoff", text(endedBefore))
+                .map((rs, ctx) -> new ExistingSession(
+                        rs.getLong("id"),
+                        rs.getString("external_stream_id"),
+                        instant(rs, "started_at"),
+                        instant(rs, "ended_at")))
+                .list());
     }
 
     /**
@@ -220,25 +240,119 @@ public final class StreamRepository {
      * <p>Cheap by nature: a local read over a small table, no network involved.
      * The limit exists to keep the dashboard readable, not to save work.
      */
-    public List<FinishedSession> findRecentSessions(long accountId, int limit) {
-        return jdbi.withHandle(h -> h
+    public List<SessionGroup> findRecentGroups(long accountId, int limit) {
+        // Two queries rather than one: the limit counts groups, and a single
+        // query would have to limit rows, which is a different thing whenever
+        // anything is merged.
+        List<Long> heads = jdbi.withHandle(h -> h
                 .createQuery("""
-                        SELECT title, category, started_at, ended_at, peak_viewers, avg_viewers
+                        SELECT COALESCE(merged_into_id, id) AS head
                         FROM stream_session
                         WHERE account_id = :accountId AND ended_at IS NOT NULL
-                        ORDER BY ended_at DESC
+                        GROUP BY head
+                        ORDER BY MAX(ended_at) DESC
                         LIMIT :limit
                         """)
                 .bind("accountId", accountId)
                 .bind("limit", limit)
-                .map((rs, ctx) -> new FinishedSession(
+                .mapTo(Long.class)
+                .list());
+
+        if (heads.isEmpty()) {
+            return List.of();
+        }
+
+        List<SessionPart> parts = jdbi.withHandle(h -> h
+                .createQuery("""
+                        SELECT COALESCE(merged_into_id, id) AS head,
+                               title, category, started_at, ended_at,
+                               peak_viewers, avg_viewers, sample_count,
+                               status, end_source
+                        FROM stream_session
+                        WHERE account_id = :accountId
+                          AND ended_at IS NOT NULL
+                          AND COALESCE(merged_into_id, id) IN (<heads>)
+                        ORDER BY started_at
+                        """)
+                .bind("accountId", accountId)
+                .bindList("heads", heads)
+                .map((rs, ctx) -> new SessionPart(
+                        rs.getLong("head"),
                         rs.getString("title"),
                         rs.getString("category"),
                         instant(rs, "started_at"),
                         instant(rs, "ended_at"),
                         rs.getObject("peak_viewers") == null ? null : rs.getLong("peak_viewers"),
-                        rs.getObject("avg_viewers") == null ? null : rs.getDouble("avg_viewers")))
+                        rs.getObject("avg_viewers") == null ? null : rs.getDouble("avg_viewers"),
+                        rs.getObject("sample_count") == null ? 0 : rs.getInt("sample_count"),
+                        rs.getString("status"),
+                        rs.getString("end_source")))
                 .list());
+
+        // Combined in Java on purpose. Duration is the sum of time actually on
+        // air, never the span from first start to last end — a broadcast with a
+        // forty-minute break in the middle did not last forty minutes longer.
+        // Expressing that in SQL would mean date arithmetic over ISO text, which
+        // is exactly the kind of cleverness that reads wrong later.
+        return heads.stream()
+                .map(head -> combine(head, parts.stream().filter(p -> p.head() == head).toList()))
+                .filter(Objects::nonNull)
+                .toList();
+    }
+
+    private static SessionGroup combine(long head, List<SessionPart> parts) {
+        if (parts.isEmpty()) {
+            return null;
+        }
+
+        long onAirSeconds = 0;
+        long expectedSamples = 0;
+        int sampleCount = 0;
+        double weightedViewerMinutes = 0;
+        Long peak = null;
+
+        for (SessionPart part : parts) {
+            Duration onAir = Duration.between(part.startedAt(), part.endedAt());
+            onAirSeconds += onAir.getSeconds();
+            expectedSamples += Math.max(1, onAir.toMinutes());
+            sampleCount += part.sampleCount();
+
+            if (part.avgViewers() != null) {
+                weightedViewerMinutes += part.avgViewers() * part.sampleCount();
+            }
+            if (part.peakViewers() != null && (peak == null || part.peakViewers() > peak)) {
+                peak = part.peakViewers();
+            }
+        }
+
+        SessionPart first = parts.get(0);
+        SessionPart last = parts.get(parts.size() - 1);
+
+        // A group is only as settled as its least settled part. One broadcast
+        // still waiting on its archive means the combined figures can still
+        // move, and saying otherwise would be the exact overstatement the
+        // settling states exist to prevent.
+        boolean settling = parts.stream().anyMatch(p -> "SETTLING".equals(p.status()));
+
+        // When the parts were settled by different means, the group inherits the
+        // weaker one. A duration that is part measured and part estimated is an
+        // estimate.
+        boolean allFromArchive = parts.stream().allMatch(p -> "VOD".equals(p.endSource()));
+
+        return new SessionGroup(
+                head,
+                first.title(),
+                first.category(),
+                first.startedAt(),
+                last.endedAt(),
+                onAirSeconds,
+                peak,
+                sampleCount == 0 ? null : weightedViewerMinutes / sampleCount,
+                sampleCount,
+                expectedSamples,
+                parts.size(),
+                settling ? "SETTLING" : "FINAL",
+                allFromArchive ? "VOD" : "SAMPLES");
     }
 
     /**
@@ -267,6 +381,29 @@ public final class StreamRepository {
     }
 
     /**
+     * The broadcast that finished most recently.
+     *
+     * <p>Used when a new one starts with nothing currently open, to see whether
+     * the two are close enough in time to be worth asking about.
+     */
+    public Optional<ExistingSession> findMostRecentFinished(long accountId) {
+        return jdbi.withHandle(h -> h
+                .createQuery("""
+                        SELECT id, external_stream_id, started_at, ended_at
+                        FROM stream_session
+                        WHERE account_id = :accountId AND ended_at IS NOT NULL
+                        ORDER BY ended_at DESC
+                        """)
+                .bind("accountId", accountId)
+                .map((rs, ctx) -> new ExistingSession(
+                        rs.getLong("id"),
+                        rs.getString("external_stream_id"),
+                        instant(rs, "started_at"),
+                        instant(rs, "ended_at")))
+                .findFirst());
+    }
+
+    /**
      * Puts a session back on air.
      *
      * <p>The stored summary is cleared along with {@code ended_at}: peak and
@@ -280,6 +417,8 @@ public final class StreamRepository {
                 .createUpdate("""
                         UPDATE stream_session SET
                             ended_at = NULL,
+                            status = 'LIVE',
+                            end_source = NULL,
                             peak_viewers = NULL,
                             avg_viewers = NULL,
                             sample_count = NULL
@@ -287,9 +426,119 @@ public final class StreamRepository {
                         """)
                 .bind("id", sessionId)
                 .execute());
+    }
 
+    // -----------------------------------------------------------------------
+    // Grouping
+    //
+    // A merge is a link, never a rewrite. Nothing is combined in storage, so
+    // undoing it is one UPDATE and no data was destroyed to make it.
+    // -----------------------------------------------------------------------
+
+    /**
+     * Groups one session into another.
+     *
+     * <p>Resolves the target to the head of its group first, so chains never
+     * form and every query can group by {@code COALESCE(merged_into_id, id)}
+     * without following links.
+     *
+     * <p>Any sessions already grouped under the moving session come along,
+     * otherwise they would be orphaned pointing at a session that is no longer
+     * a head.
+     */
+    public void merge(long sessionId, long intoSessionId) {
+        jdbi.useHandle(h -> {
+            long head = h.createQuery("SELECT COALESCE(merged_into_id, id) FROM stream_session WHERE id = :id")
+                    .bind("id", intoSessionId)
+                    .mapTo(Long.class)
+                    .one();
+
+            if (head == sessionId) {
+                // The target already belongs to this session's group. Merging
+                // would point a head at its own child.
+                return;
+            }
+
+            h.createUpdate("UPDATE stream_session SET merged_into_id = :head WHERE merged_into_id = :id")
+                    .bind("head", head)
+                    .bind("id", sessionId)
+                    .execute();
+
+            h.createUpdate("UPDATE stream_session SET merged_into_id = :head WHERE id = :id")
+                    .bind("head", head)
+                    .bind("id", sessionId)
+                    .execute();
+        });
+    }
+
+    /**
+     * Groups a chosen set of broadcasts together.
+     *
+     * <p>The earliest becomes the head, which is the only ordering that reads
+     * naturally in a history sorted by time.
+     *
+     * <p>Selecting the set is the person's job, not the collector's. Two
+     * broadcasts that dropped and resumed and a third that was deliberately
+     * started afterwards look the same from here; only they know which is which,
+     * so the interface offers the candidates and merges exactly what was ticked.
+     */
+    public void mergeAll(List<Long> sessionIds) {
+        if (sessionIds == null || sessionIds.size() < 2) {
+            return;
+        }
+
+        List<Long> ordered = jdbi.withHandle(h -> h
+                .createQuery("""
+                        SELECT id FROM stream_session
+                        WHERE id IN (<ids>)
+                        ORDER BY started_at
+                        """)
+                .bindList("ids", sessionIds)
+                .mapTo(Long.class)
+                .list());
+
+        if (ordered.size() < 2) {
+            return;
+        }
+
+        long head = ordered.get(0);
+        for (int i = 1; i < ordered.size(); i++) {
+            merge(ordered.get(i), head);
+        }
+    }
+
+    /**
+     * Whether any of these broadcasts is still on air.
+     *
+     * <p>Merging one that has not finished would settle a question about figures
+     * that do not exist yet — it has no duration, no average and no peak until it
+     * ends.
+     */
+    public boolean anyStillLive(List<Long> sessionIds) {
+        if (sessionIds == null || sessionIds.isEmpty()) {
+            return false;
+        }
+
+        return jdbi.withHandle(h -> h
+                .createQuery("SELECT COUNT(*) FROM stream_session WHERE id IN (<ids>) AND ended_at IS NULL")
+                .bindList("ids", sessionIds)
+                .mapTo(Integer.class)
+                .one()) > 0;
+    }
+
+    /** The head of the group a session belongs to, or itself when it stands alone. */
+    public long groupHead(long sessionId) {
+        return jdbi.withHandle(h -> h
+                .createQuery("SELECT COALESCE(merged_into_id, id) FROM stream_session WHERE id = :id")
+                .bind("id", sessionId)
+                .mapTo(Long.class)
+                .one());
+    }
+
+    /** Detaches a session from its group, leaving it standing alone again. */
+    public void unmerge(long sessionId) {
         jdbi.useHandle(h -> h
-                .createUpdate("UPDATE stream_segment SET ended_at = NULL WHERE session_id = :id")
+                .createUpdate("UPDATE stream_session SET merged_into_id = NULL WHERE id = :id")
                 .bind("id", sessionId)
                 .execute());
     }
@@ -309,7 +558,8 @@ public final class StreamRepository {
     public List<SessionTotals> findSessionsBetween(long accountId, Instant from, Instant to) {
         return jdbi.withHandle(h -> h
                 .createQuery("""
-                        SELECT started_at, ended_at, peak_viewers, avg_viewers, sample_count
+                        SELECT COALESCE(merged_into_id, id) AS head,
+                               started_at, ended_at, peak_viewers, avg_viewers, sample_count
                         FROM stream_session
                         WHERE account_id = :accountId
                           AND ended_at IS NOT NULL
@@ -321,6 +571,7 @@ public final class StreamRepository {
                 .bind("from", text(from))
                 .bind("to", text(to))
                 .map((rs, ctx) -> new SessionTotals(
+                        rs.getLong("head"),
                         instant(rs, "started_at"),
                         instant(rs, "ended_at"),
                         rs.getObject("peak_viewers") == null ? null : rs.getLong("peak_viewers"),
@@ -406,6 +657,7 @@ public final class StreamRepository {
      * a month from last year adds up the same as it did the day it closed.
      */
     public record SessionTotals(
+            long groupId,
             Instant startedAt,
             Instant endedAt,
             Long peakViewers,
@@ -433,6 +685,54 @@ public final class StreamRepository {
         public long expectedSamples() {
             return Math.max(1, onAir().toMinutes());
         }
+    }
+
+    /** One row of the group query, before the parts are combined. */
+    private record SessionPart(
+            long head,
+            String title,
+            String category,
+            Instant startedAt,
+            Instant endedAt,
+            Long peakViewers,
+            Double avgViewers,
+            int sampleCount,
+            String status,
+            String endSource) {
+    }
+
+    /**
+     * A broadcast as it is shown in the history: one session, or several that
+     * someone decided were one.
+     *
+     * @param onAirSeconds    the sum of time actually broadcasting. A break
+     *                        between two merged parts is not counted, because
+     *                        nobody was on air during it
+     * @param avgViewers      weighted by samples, so a short reconnection does
+     *                        not weigh as much as a long stretch
+     * @param expectedSamples what a complete recording would hold, for coverage
+     * @param parts           how many broadcasts this group contains. More than
+     *                        one means somebody merged them
+     * @param status          SETTLING while any part may still change, FINAL
+     *                        once every one of them is settled
+     * @param endSource       VOD when the end time came from the platform's own
+     *                        archive, SAMPLES when it came from the last reading
+     *                        this application managed to take
+     */
+    public record SessionGroup(
+            long id,
+            String title,
+            String category,
+            Instant startedAt,
+            Instant endedAt,
+            long onAirSeconds,
+            Long peakViewers,
+            Double avgViewers,
+            int sampleCount,
+            long expectedSamples,
+            int parts,
+            String status,
+            String endSource) {
     }
 
     /** A broadcast that has ended, with its stored summary. */
