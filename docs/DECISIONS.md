@@ -721,6 +721,28 @@ watched one, and this project does not report things nobody watched.
 
 ---
 
+## Parked
+
+Twitch is frozen. What follows is written down so it stops taking up room, not
+because anyone is working on it. Nothing here gets built until the other
+platforms are in, unless something breaks.
+
+- [ ] **Seeing a merged evening both ways.** A merged group currently shows only
+  as one line. Sometimes the question is "how did Tuesday go", and sometimes it
+  is "how bad was that outage" — the second needs the parts visible. The data
+  supports both already, since merging is a link and nothing was destroyed to
+  make it; this is a display that does not exist yet.
+- [ ] **Follower count at the start and end of a broadcast.** Twitch reports
+  "+1 follower" for a stream and this application cannot, because snapshots are
+  daily and one value per day overwrites the rest. Two extra readings per
+  broadcast would answer it. Surfaced when comparing against their dashboard on
+  2026-09-01.
+- [ ] **Automatic backups.** Decided on day one (§ 8), still not built. The
+  database is the only irreplaceable thing here.
+- [ ] **Charts over the collected history.** The reason the snapshots exist.
+- [ ] **Sampling faster to catch brief peaks** (§ 18.2), which requires storing
+  the sampling interval and changing two calculations.
+
 ## Open questions
 
 - [ ] **Per-post data.** No table yet. It is what would most help decide what to
