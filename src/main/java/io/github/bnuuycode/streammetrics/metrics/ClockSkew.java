@@ -2,6 +2,7 @@ package io.github.bnuuycode.streammetrics.metrics;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.format.DateTimeFormatter;
 import java.util.Optional;
 
 /**
@@ -47,7 +48,10 @@ public final class ClockSkew {
         }
 
         long offset = Duration.between(serverTime, localTime).getSeconds();
-        last = new Observation(offset, localTime, level(Math.abs(offset)));
+        last = new Observation(
+                offset,
+                DateTimeFormatter.ISO_INSTANT.format(localTime),
+                level(Math.abs(offset)));
     }
 
     /** The most recent reading, absent until a response has been seen. */
@@ -65,10 +69,15 @@ public final class ClockSkew {
     /**
      * @param offsetSeconds positive when this machine is ahead of the platform,
      *                      negative when behind
+     * @param observedAt    ISO-8601, like every other timestamp this application
+     *                      hands out. It was an {@code Instant} at first, which
+     *                      the JSON layer rendered as a bare number — the one
+     *                      timestamp in the whole API that came out in a
+     *                      different shape from all the others
      * @param level         OK below thirty seconds, DRIFTING below five minutes,
      *                      BROKEN beyond — the point at which a calendar day can
      *                      be recorded wrongly
      */
-    public record Observation(long offsetSeconds, Instant observedAt, String level) {
+    public record Observation(long offsetSeconds, String observedAt, String level) {
     }
 }

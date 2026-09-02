@@ -211,7 +211,7 @@ public final class LiveSampler implements Runnable {
         // broadcast that ended fifteen minutes ago and one starting now may
         // still be the same evening.
         if (previousId == null) {
-            Optional<ExistingSession> last = streams.findMostRecentFinished(accountId);
+            Optional<StreamRepository.FinishedSession> last = streams.findLastFinishedSession(accountId);
             if (last.isPresent() && last.get().id() != sessionId) {
                 previousId = last.get().id();
                 previousEnd = last.get().endedAt();

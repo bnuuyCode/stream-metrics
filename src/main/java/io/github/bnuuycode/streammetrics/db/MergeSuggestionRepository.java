@@ -25,7 +25,6 @@ import java.util.Optional;
  */
 public final class MergeSuggestionRepository {
 
-    public static final String PENDING = "PENDING";
     public static final String MERGED = "MERGED";
     public static final String DISMISSED = "DISMISSED";
 

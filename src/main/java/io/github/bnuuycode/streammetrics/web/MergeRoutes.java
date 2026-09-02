@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Answering the collector's question about whether several broadcasts were one.
@@ -130,14 +131,29 @@ public final class MergeRoutes {
     private void dismissCluster(Context ctx) {
         Instant now = Instant.now();
 
+        Optional<Long> accountId = accounts.findAccount(PLATFORM).map(StoredAccount::id);
+        if (accountId.isEmpty()) {
+            ctx.status(409).json(ApiResponse.error("No Twitch account connected", now));
+            return;
+        }
+
         Selection selection = ctx.bodyAsClass(Selection.class);
-        List<Long> suggestionIds = selection == null || selection.suggestionIds() == null
+        List<Long> requested = selection == null || selection.suggestionIds() == null
                 ? List.of()
                 : selection.suggestionIds();
 
-        suggestionIds.forEach(id -> suggestions.decide(id, MergeSuggestionRepository.DISMISSED));
+        // Only ids that are genuinely this account's open questions. The sibling
+        // endpoint already checked ownership and this one did not, which is the
+        // kind of asymmetry that is harmless in a single-user application right
+        // up until it is not.
+        Set<Long> mine = suggestions.pending(accountId.get()).stream()
+                .map(PendingSuggestion::id)
+                .collect(Collectors.toSet());
 
-        log.info("{} question(s) answered as separate broadcasts", suggestionIds.size());
+        List<Long> allowed = requested.stream().filter(mine::contains).toList();
+        allowed.forEach(id -> suggestions.decide(id, MergeSuggestionRepository.DISMISSED));
+
+        log.info("{} question(s) answered as separate broadcasts", allowed.size());
         ctx.json(ApiResponse.ok("DISMISSED", now));
     }
 
@@ -148,10 +164,18 @@ public final class MergeRoutes {
      * destroyed to create it, so undoing it costs one update and loses nothing.
      */
     private void unmerge(Context ctx) {
+        Instant now = Instant.now();
         long sessionId = Long.parseLong(ctx.pathParam("id"));
+
+        Optional<Long> accountId = accounts.findAccount(PLATFORM).map(StoredAccount::id);
+        if (accountId.isEmpty() || !streams.belongsTo(sessionId, accountId.get())) {
+            ctx.status(404).json(ApiResponse.error("No such broadcast", now));
+            return;
+        }
+
         streams.unmerge(sessionId);
         log.info("Session {} detached from its group", sessionId);
-        ctx.json(ApiResponse.ok("UNMERGED", Instant.now()));
+        ctx.json(ApiResponse.ok("UNMERGED", now));
     }
 
     private int closeSettledQuestions(long accountId) {
@@ -229,7 +253,15 @@ public final class MergeRoutes {
                 continue;
             }
 
-            clusters.add(build(members, broadcasts, suggestionsBySession));
+            Cluster cluster = build(members, broadcasts, suggestionsBySession);
+
+            // An empty run cannot be shown or sorted — the sort below reads the
+            // first part of every cluster. build() drops broadcasts with no start
+            // time, so being defensive there and not here is what would turn a
+            // row that should not exist into a crash.
+            if (!cluster.parts().isEmpty()) {
+                clusters.add(cluster);
+            }
         }
 
         clusters.sort(Comparator.comparing((Cluster c) -> c.parts().get(0).startedAt()).reversed());

@@ -214,17 +214,26 @@ public final class StreamRepository {
                 .one());
     }
 
-    /** The most recent finished broadcast, for the off-air view. */
+    /**
+     * The most recent finished broadcast.
+     *
+     * <p>Serves two callers with different needs — the off-air view wants the
+     * title and figures, the sampler wants the id and times to judge whether a
+     * new broadcast might belong with it. There used to be a method for each,
+     * with identical filters and names that meant the same thing, which is an
+     * invitation to reach for the wrong one.
+     */
     public Optional<FinishedSession> findLastFinishedSession(long accountId) {
         return jdbi.withHandle(h -> h
                 .createQuery("""
-                        SELECT title, category, started_at, ended_at, peak_viewers, avg_viewers
+                        SELECT id, title, category, started_at, ended_at, peak_viewers, avg_viewers
                         FROM stream_session
                         WHERE account_id = :accountId AND ended_at IS NOT NULL
                         ORDER BY ended_at DESC
                         """)
                 .bind("accountId", accountId)
                 .map((rs, ctx) -> new FinishedSession(
+                        rs.getLong("id"),
                         rs.getString("title"),
                         rs.getString("category"),
                         instant(rs, "started_at"),
@@ -381,27 +390,6 @@ public final class StreamRepository {
     }
 
     /**
-     * The broadcast that finished most recently.
-     *
-     * <p>Used when a new one starts with nothing currently open, to see whether
-     * the two are close enough in time to be worth asking about.
-     */
-    public Optional<ExistingSession> findMostRecentFinished(long accountId) {
-        return jdbi.withHandle(h -> h
-                .createQuery("""
-                        SELECT id, external_stream_id, started_at, ended_at
-                        FROM stream_session
-                        WHERE account_id = :accountId AND ended_at IS NOT NULL
-                        ORDER BY ended_at DESC
-                        """)
-                .bind("accountId", accountId)
-                .map((rs, ctx) -> new ExistingSession(
-                        rs.getLong("id"),
-                        rs.getString("external_stream_id"),
-                        instant(rs, "started_at"),
-                        instant(rs, "ended_at")))
-                .findFirst());
-    }
 
     /**
      * Puts a session back on air.
@@ -522,6 +510,16 @@ public final class StreamRepository {
         return jdbi.withHandle(h -> h
                 .createQuery("SELECT COUNT(*) FROM stream_session WHERE id IN (<ids>) AND ended_at IS NULL")
                 .bindList("ids", sessionIds)
+                .mapTo(Integer.class)
+                .one()) > 0;
+    }
+
+    /** Whether this broadcast belongs to this account. */
+    public boolean belongsTo(long sessionId, long accountId) {
+        return jdbi.withHandle(h -> h
+                .createQuery("SELECT COUNT(*) FROM stream_session WHERE id = :id AND account_id = :accountId")
+                .bind("id", sessionId)
+                .bind("accountId", accountId)
                 .mapTo(Integer.class)
                 .one()) > 0;
     }
@@ -737,6 +735,7 @@ public final class StreamRepository {
 
     /** A broadcast that has ended, with its stored summary. */
     public record FinishedSession(
+            long id,
             String title,
             String category,
             Instant startedAt,
