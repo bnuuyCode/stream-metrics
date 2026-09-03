@@ -721,6 +721,47 @@ watched one, and this project does not report things nobody watched.
 
 ---
 
+## 19.1. The tests are proven by breaking the code
+
+**Decision:** cover the two places this project has already got wrong — the
+stored summary of a broadcast, and the collector's decisions when a stream goes
+quiet — with automated tests, and prove each test by deliberately breaking the
+code it guards.
+
+**Why these two and not everything:** both bugs that reached real history came
+from here, and both were found the same way: by watching a live broadcast be
+recorded incorrectly. Neither threw anything. A duration that silently includes
+a forty-minute disconnection is still a number of hours, and once the samples
+are pruned at ninety days (§ 6.1) the stored summary is the only surviving
+record. Wrong permanently, and plausible the whole time.
+
+**Proven, not assumed.** A test that has never failed has never been shown to
+work. Each of these was checked by sabotaging the code underneath it:
+
+| Sabotage | Test that caught it | Reported |
+|---|---|---|
+| Duration measured start-to-end instead of time on air | `mergeExcludesTheGap` | expected 5400, was 7200 |
+| Average of averages instead of weighted mean | `averageIsWeightedBySampleCount` | expected 12.9, was 54.8 |
+| Bound on `sampled_at <= ended_at` removed | `ghostTailIsExcluded` | expected 5, was 999 |
+| A returning broadcast opens a second session | `sameStreamIdReopensTheSession` | no session on air |
+| Unreachable platform treated as "off air" | `unreachableTwitchClosesNothing` | session closed |
+
+Each sabotage broke exactly one test, which is the part worth noting: the suite
+says *which* thing is wrong, not merely that something is.
+
+**A temporary file, not `:memory:`.** In-memory reads better and would not have
+worked: every connection to `:memory:` gets its own empty database, so Flyway
+would migrate one and the code under test would read another. The temporary file
+also keeps WAL and foreign keys exactly as in production. JUnit deletes it.
+
+**Not covered:** the HTTP layer (`MergeRoutes` ownership checks are exercised
+through the repository they rely on, not through Javalin), `SettleJob`,
+`FreshnessCache`, `RateLimitGate` and `ClockSkew`. Named here rather than left
+implied, on the same principle as § 16: an untested area that nobody has written
+down is indistinguishable from one nobody thought about.
+
+---
+
 ## Parked
 
 Twitch is frozen. What follows is written down so it stops taking up room, not
