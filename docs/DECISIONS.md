@@ -132,7 +132,14 @@ the behavior decision 3 forbids.
 
 ## 5. Target platforms
 
-**Included:** Twitch (first), YouTube (Data API), Bluesky, Discord, Instagram.
+**Included, in the order they will be built:** Twitch (done), Instagram (next),
+TikTok, YouTube (Data API), possibly Threads.
+
+**Dropped from the original list on 2026-09-01, for lack of anything to
+measure:** Bluesky, where there is no account, and Discord, where the server is
+empty. Both were listed on day one on the assumption they would be used. A
+platform with no activity would produce a card of zeroes, which reads as a
+collection failure rather than as an accurate report of nothing.
 
 **Excluded — X/Twitter:** paid API, basic tier around US$100/month.
 Unjustifiable cost for reading one's own metrics. Firm decision, not to be
@@ -156,6 +163,57 @@ entire point of the project (see Context) — every excluded platform is one mor
 tab I still have to open by hand. X is the painful one. The answer is to cover
 the reachable platforms properly rather than to cover none, and to be honest on
 the dashboard about which networks are simply not there.
+
+---
+
+## 5.1. TikTok is reachable through Sandbox, not through approval
+
+**Checked on 2026-09-02, against TikTok's own developer documentation.** Written
+down because this was researched once before and never recorded, which meant it
+had to be researched again.
+
+**Correcting an earlier claim made in conversation:** that TikTok blocks all
+access until an app passes review, and that starting there risks waiting on
+someone else's queue. That is wrong. Sandbox Mode exists precisely to remove
+that wait.
+
+**What Sandbox is:** a way to run a real integration without submitting the app
+for review. Up to five sandboxes per app, and up to ten *target users* — TikTok
+accounts added by supplying their login credentials, so in practice accounts the
+developer owns. Which is exactly the shape of this project: one person, their own
+account.
+
+**What Sandbox explicitly excludes**, and the exclusion list is short: the
+Content Posting API for public videos, and the Data Portability API. The User
+Info and video-listing APIs this project needs are not on that list.
+
+**The scopes that matter here:**
+
+| Scope | What it returns |
+|---|---|
+| `user.info.basic` | open id, avatar, display name. Added by default with Login Kit |
+| `user.info.stats` | follower count, following count, likes count, video count |
+| `video.list` | the account's public videos |
+
+`user.info.stats` is the daily-totals equivalent of what Twitch gives, and
+`video.list` is the per-post path that § "Open questions" has been waiting on.
+
+**What the documentation does not say**, and therefore what this section does not
+claim: whether Sandbox returns fully real figures or reduced ones for these
+endpoints, and whether a sandbox expires. Neither is stated anywhere official.
+Both are cheap to settle by creating the app and looking, which is the reason to
+do that early rather than late.
+
+**App review is still required to leave Sandbox** — that is, to serve anyone who
+is not a target user. This project has no such ambition, so review may never be
+needed at all. A third-party guide put a clean first submission at one to two
+weeks in 2026; that figure is not from TikTok and is recorded as hearsay.
+
+**Consequence for ordering:** Instagram still goes first, but for the
+architectural reason rather than the blocking one — it is the first platform that
+implements `MetricsProvider` without `LiveTrackable`, which is the capability
+split of § 12.1 finally being tested. The TikTok app and sandbox should be
+created in parallel, because doing so also settles the two unknowns above.
 
 ---
 
